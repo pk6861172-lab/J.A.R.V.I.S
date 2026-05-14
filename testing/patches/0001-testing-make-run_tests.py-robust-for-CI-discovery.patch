@@ -1,0 +1,101 @@
+From 1f80c4e167cfc9ed7b2aabfc39db919f617eb3d8 Mon Sep 17 00:00:00 2001
+From: Copilot <copilot@example.com>
+Date: Thu, 14 May 2026 19:38:28 +0530
+Subject: [PATCH] testing: make run_tests.py robust for CI discovery
+
+Make test runner import tests explicitly and run them, logging discovery for CI debugging.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ testing/debug_import_tests.py | 23 +++++++++++++++++
+ testing/run_tests.py          | 48 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 71 insertions(+)
+ create mode 100644 testing/debug_import_tests.py
+ create mode 100644 testing/run_tests.py
+
+diff --git a/testing/debug_import_tests.py b/testing/debug_import_tests.py
+new file mode 100644
+index 0000000..57b1fa8
+--- /dev/null
++++ b/testing/debug_import_tests.py
+@@ -0,0 +1,23 @@
++import os, sys, importlib.util, traceback
++proj_root = r"C:\Users\PRASHANT\OneDrive\Desktop\J.A.R.V.I.S"
++start_dir = os.path.join(proj_root, 'backend')
++print('Start dir:', start_dir)
++for root, dirs, files in os.walk(start_dir):
++    for f in files:
++        if f.startswith('test_') and f.endswith('.py'):
++            path = os.path.join(root, f)
++            print('\nFound test file:', path)
++            try:
++                spec = importlib.util.spec_from_file_location(f[:-3], path)
++                mod = importlib.util.module_from_spec(spec)
++                sys.modules[spec.name] = mod
++                spec.loader.exec_module(mod)
++                print('Imported', spec.name)
++                import unittest
++                cases = [name for name,obj in vars(mod).items() if isinstance(obj, type) and issubclass(obj, unittest.TestCase)]
++                print('TestCase classes found:', cases)
++            except Exception as e:
++                print('Import failed:', e)
++                traceback.print_exc()
++print('\nSys.path:')
++print('\n'.join(sys.path))
+diff --git a/testing/run_tests.py b/testing/run_tests.py
+new file mode 100644
+index 0000000..311ff45
+--- /dev/null
++++ b/testing/run_tests.py
+@@ -0,0 +1,48 @@
++import os
++import sys
++import unittest
++import importlib.util
++import traceback
++
++# Ensure project root on sys.path
++proj_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
++if proj_root not in sys.path:
++    sys.path.insert(0, proj_root)
++
++print(f'Running backend tests with PYTHONPATH={proj_root}')
++loader = unittest.TestLoader()
++suite = unittest.TestSuite()
++
++start_dir = os.path.join(proj_root, 'backend')
++print('Scanning for test files under', start_dir)
++count = 0
++for root, dirs, files in os.walk(start_dir):
++    for fname in files:
++        if not (fname.startswith('test_') and fname.endswith('.py')):
++            continue
++        count += 1
++        path = os.path.join(root, fname)
++        rel = os.path.relpath(path, proj_root).replace(os.path.sep, '.')
++        mod_name = rel[:-3]  # strip .py
++        # Create a unique module name to avoid conflicts
++        unique_mod_name = f'testfile_{count}_{mod_name.replace(".","_")}'
++        print(f'Loading {path} as {unique_mod_name}')
++        try:
++            spec = importlib.util.spec_from_file_location(unique_mod_name, path)
++            mod = importlib.util.module_from_spec(spec)
++            sys.modules[unique_mod_name] = mod
++            spec.loader.exec_module(mod)
++            tests = loader.loadTestsFromModule(mod)
++            if tests.countTestCases() > 0:
++                suite.addTests(tests)
++                print(f'  -> Loaded {tests.countTestCases()} tests')
++            else:
++                print('  -> No tests found in module')
++        except Exception:
++            print('  -> Import/run failed:')
++            traceback.print_exc()
++
++print(f'Found {count} test files, total collected tests: {suite.countTestCases()}')
++runner = unittest.TextTestRunner(verbosity=2)
++result = runner.run(suite)
++sys.exit(0 if result.wasSuccessful() else 1)
+-- 
+2.54.0.windows.1
+

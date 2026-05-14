@@ -1,0 +1,29 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt || true
+          pip install selenium webdriver-manager pyautogui || true
+      - name: Start MCP connector
+        env:
+          JARVIS_MCP_TOKEN: ${{ secrets.JARVIS_MCP_TOKEN }}
+        run: |
+          nohup python -m uvicorn backend.mcp.connector:app --host 127.0.0.1 --port 8000 &
+          sleep 3
+      - name: Run tests
+        run: |
+          python testing/run_tests.py
+          # Ensure CI prints diagnostics if discovery fails
+          echo "If tests fail, check testing/run_tests.py logs and testing/patches for applied patches"
