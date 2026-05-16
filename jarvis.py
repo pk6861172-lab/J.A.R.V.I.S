@@ -1161,6 +1161,30 @@ def _aibrain_model_candidates(self, vision: bool = False) -> list[str]:
     return ordered
 
 
+def _extract_json_tool_call(text: str):
+    """Extract a JSON tool-call dict from free-form text.
+
+    Free models that lack native function-calling may still output
+    their intended action as inline JSON.  We look for common patterns
+    like ```json {...} ``` or bare {"action": ...} objects.
+    """
+    import re as _re, json as _json
+    patterns = [
+        r'```json\s*(\{.+?\})\s*```',
+        r'```\s*(\{.+?\})\s*```',
+        r'(\{\s*"action"\s*:\s*"[^"]+".+?\})',
+    ]
+    for pat in patterns:
+        for m in _re.finditer(pat, text, _re.DOTALL):
+            try:
+                obj = _json.loads(m.group(1))
+                if isinstance(obj, dict) and "action" in obj:
+                    return obj
+            except (_json.JSONDecodeError, IndexError):
+                continue
+    return None
+
+
 def _aibrain_create_completion(self, messages: list, models: list[str], _depth: int = 0, force_tools: bool = False, _retries: int = 0) -> str:
     provider = getattr(self, "ai_provider", "openrouter")
     provider_label = getattr(self, "ai_provider_label", "AI provider")
@@ -1184,6 +1208,8 @@ def _aibrain_create_completion(self, messages: list, models: list[str], _depth: 
         tools = TOOLS_SCHEMA
     except ImportError as e:
         tools = None
+        if force_tools:
+            return f"[Cowork Error] Backend tools failed to load: {e}. Cannot execute computer actions."
         print(f"[Tools Error] {e}")
 
     # Offline: local Ollama (OpenAI-compatible API). Skip for multimodal messages.
@@ -1218,7 +1244,7 @@ def _aibrain_create_completion(self, messages: list, models: list[str], _depth: 
             kwargs = {
                 "model": model,
                 "messages": messages,
-                "max_tokens": 900
+                "max_tokens": 1500 if force_tools else 900
             }
             if tools and provider != "ollama":
                 # After depth 10, stop sending tools entirely to force a text summary
@@ -1226,10 +1252,13 @@ def _aibrain_create_completion(self, messages: list, models: list[str], _depth: 
                     pass  # Don't add tools — model MUST return text
                 else:
                     kwargs["tools"] = tools
-                    # Only force tool_choice on the FIRST call (depth 0) to get started
-                    # After that, let the model decide when to stop and summarize
-                    if force_tools and _depth == 0:
-                        kwargs["tool_choice"] = "required"
+                    # Use "auto" — widely supported. "required" is ignored
+                    # or rejected by many free models.
+                    if force_tools and _depth < 6:
+                        kwargs["tool_choice"] = "auto"
+
+            if force_tools:
+                print(f"\n[COWORK] model={model}  depth={_depth}  retries={_retries}")
 
             resp = self.client.chat.completions.create(**kwargs)
             message = resp.choices[0].message
@@ -1243,12 +1272,19 @@ def _aibrain_create_completion(self, messages: list, models: list[str], _depth: 
                 except Exception:
                     func_args = {}
                 
-                print(f"\n[JARVIS IS EXECUTING TOOL: {func_name}]")
+                action_name = func_args.get('action', 'unknown')
+                print(f"\n[JARVIS IS EXECUTING TOOL: {func_name}] (step {_depth + 1})")
+                print(f"  -> action={action_name}  args={json.dumps({k:v for k,v in func_args.items() if k != 'action'})}")
                 db = SessionLocal()
                 try:
                     tool_result = execute_tool(db, func_name, func_args)
                 finally:
                     db.close()
+                # Log result (truncate screenshots)
+                if tool_result.startswith("[SCREENSHOT"):
+                    print(f"  -> result: screenshot captured ({len(tool_result)} chars)")
+                else:
+                    print(f"  -> result: {tool_result[:200]}")
                 
                 messages.append({
                     "role": "assistant",
@@ -1279,7 +1315,15 @@ def _aibrain_create_completion(self, messages: list, models: list[str], _depth: 
                     messages.append({
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": f"Here is a screenshot of the screen. The REAL screen resolution is {_sw}x{_sh}. This image is scaled down for efficiency, but all coordinates you provide in tool calls MUST be in the real {_sw}x{_sh} pixel space. Analyze the image and determine the correct real-screen (X, Y) coordinates for your next action. Make exactly ONE tool call now."},
+                            {"type": "text", "text": (
+                                f"Screenshot of the screen. Resolution: {_sw}x{_sh}. "
+                                f"Coordinates in tool calls MUST be in {_sw}x{_sh} space. "
+                                "Analyze the image and make ONE tool call for the next action. "
+                                "If you cannot use native tool calling, output ONLY a JSON object like: "
+                                '{"action": "click", "x": 500, "y": 300} or '
+                                '{"action": "hotkey", "keys": ["win", "r"]} or '
+                                '{"action": "type", "text": "hello"}'
+                            )},
                             {"type": "image_url", "image_url": {"url": b64_url}}
                         ]
                     })
@@ -1293,10 +1337,20 @@ def _aibrain_create_completion(self, messages: list, models: list[str], _depth: 
                         "name": func_name,
                         "content": tool_result
                     })
-                    messages.append({
-                        "role": "system", 
-                        "content": f"Tool '{func_name}' executed. Result: '{tool_result}'. If the user's ORIGINAL task is now COMPLETE, respond with a brief text summary. If more steps are needed, make ONE more tool call. Do NOT repeat actions already done. Do NOT use XML tags."
-                    })
+                    if force_tools and _depth < 6:
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                f"Action executed. Result: {tool_result}. "
+                                "Now take a screenshot to verify the action worked before continuing. "
+                                'Use: {"action": "screenshot"}'
+                            )
+                        })
+                    else:
+                        messages.append({
+                            "role": "system", 
+                            "content": f"Tool '{func_name}' executed. Result: '{tool_result}'. If the user's ORIGINAL task is now COMPLETE, respond with a brief text summary. If more steps are needed, make ONE more tool call. Do NOT repeat actions already done. Do NOT use XML tags."
+                        })
                 # Recursively call to summarize or continue tool execution
                 return _aibrain_create_completion(self, messages, [model], _depth=_depth + 1, force_tools=force_tools)
 
@@ -1307,29 +1361,108 @@ def _aibrain_create_completion(self, messages: list, models: list[str], _depth: 
                     for part in reply
                     if isinstance(part, dict) and part.get("type") == "text"
                 ).strip()
-            
-            # Anti-hallucination: detect if AI claims it performed physical actions
-            # without actually making any tool calls (no tool_calls in response)
-            if reply and tools and _depth <= 2 and force_tools:
+
+            # ── TEXT-BASED JSON TOOL-CALL EXTRACTION ──────────────
+            # Many free models ignore native tool calling but still
+            # output JSON in their text.  Parse it and execute.
+            if reply and force_tools and _depth < 10 and tools:
+                extracted = _extract_json_tool_call(reply)
+                if extracted:
+                    action_name = extracted.get("action", "unknown")
+                    print(f"\n[JARVIS IS EXECUTING TOOL: computer_use] (step {_depth + 1}) [parsed from text]")
+                    print(f"  -> action={action_name}  args={json.dumps({k:v for k,v in extracted.items() if k != 'action'})}")
+                    db = SessionLocal()
+                    try:
+                        tool_result = execute_tool(db, "computer_use", extracted)
+                    finally:
+                        db.close()
+                    if tool_result.startswith("[SCREENSHOT"):
+                        print(f"  -> result: screenshot captured ({len(tool_result)} chars)")
+                    else:
+                        print(f"  -> result: {tool_result[:200]}")
+
+                    messages.append({"role": "assistant", "content": reply})
+
+                    if tool_result.startswith("[SCREENSHOT DATA BASE64]: "):
+                        b64_url = tool_result.replace("[SCREENSHOT DATA BASE64]: ", "").split("  ...")[0].strip()
+                        try:
+                            import pyautogui as _pag
+                            _sw, _sh = _pag.size()
+                        except Exception:
+                            _sw, _sh = 1920, 1080
+                        messages.append({
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": (
+                                    f"Screenshot captured. Resolution: {_sw}x{_sh}. "
+                                    "What is the next action? Output ONLY a JSON object, e.g. "
+                                    '{"action": "click", "x": 500, "y": 300}'
+                                )},
+                                {"type": "image_url", "image_url": {"url": b64_url}}
+                            ]
+                        })
+                        vision_models = self._model_candidates(vision=True)
+                        return _aibrain_create_completion(self, messages, vision_models, _depth=_depth + 1, force_tools=force_tools)
+                    else:
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                f"Action executed. Result: {tool_result}. "
+                                "Take a screenshot to verify, or continue with the next action. "
+                                'Output ONLY a JSON object, e.g. {"action": "screenshot"}'
+                            )
+                        })
+                        return _aibrain_create_completion(self, messages, models, _depth=_depth + 1, force_tools=force_tools)
+
+            # ── COWORK GUARD ──────────────────────────────────────
+            # In cowork mode at low depth the model should be making
+            # tool calls, not returning text.  Reject and retry,
+            # asking it to output JSON if native tools don't work.
+            if reply and force_tools and _depth < 4 and _retries < 3:
+                print(f"\n[COWORK] Text response at depth {_depth} (retry {_retries + 1}/3): {reply[:120]}...")
+                messages.append({"role": "assistant", "content": reply})
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "STOP. You responded with text instead of performing an action. "
+                        "You MUST interact with the screen. Either make a native tool call, "
+                        "or output ONLY a JSON object on a single line:\n"
+                        '{"action": "screenshot"}\n'
+                        "Do NOT add any other text. Just the JSON."
+                    )
+                })
+                return _aibrain_create_completion(self, messages, models, _depth=_depth, force_tools=True, _retries=_retries + 1)
+
+            # ── ANTI-HALLUCINATION ────────────────────────────────
+            # Detect if AI claims it performed physical actions
+            # without actually making any tool calls.
+            if reply and tools and _depth <= 8 and force_tools and _retries < 3:
                 hallucination_phrases = [
                     "screenshot has been taken", "screenshot taken", "i've taken a screenshot",
                     "i clicked", "i have clicked", "mouse has been", "mouse was moved",
                     "i typed", "i have typed", "i pressed", "i opened",
                     "has been clicked", "has been opened", "has been typed",
-                    "is now open", "file explorer should now be open",
+                    "is now open", "are now open", "now open in",
+                    "file explorer should now be open",
                     "chrome is now open", "notepad is now open",
+                    "i have opened", "successfully opened", "has been launched",
+                    "search results for", "results are now",
+                    "task is complete", "task has been completed",
+                    "done for you", "completed the task",
                 ]
                 reply_lower = reply.lower()
                 is_hallucinating = any(phrase in reply_lower for phrase in hallucination_phrases)
                 if is_hallucinating:
-                    # Force the AI to actually use tools instead of narrating
+                    print(f"\n[COWORK] Hallucination detected at depth {_depth}: {reply[:120]}...")
                     messages.append({"role": "assistant", "content": reply})
                     messages.append({
                         "role": "user",
-                        "content": "You just described actions but did NOT actually execute them. You MUST use the computer_use tool to perform physical actions. Do NOT narrate — call the tool NOW. Start with action='screenshot' to see the screen, then proceed step by step with one tool call at a time."
+                        "content": (
+                            "You described actions but did NOT actually execute them. "
+                            "You MUST use the computer_use tool or output a JSON object. "
+                            'Start with: {"action": "screenshot"}'
+                        )
                     })
-                    print("\n[JARVIS: Detected hallucination, forcing tool use...]")
-                    # Don't increment depth — this is an error retry, not a successful step
                     return _aibrain_create_completion(self, messages, models, _depth=_depth, force_tools=True, _retries=_retries + 1)
             
             return reply or "I have a response, but it appears to be empty."
@@ -1508,7 +1641,16 @@ def _aibrain_chat(self, user_input: str, context: str = "") -> str:
     if is_cowork:
         # For cowork: add explicit instruction to use tools
         messages.append({"role": "user", "content": prompt})
-        messages.append({"role": "system", "content": "The user is requesting a PHYSICAL COMPUTER ACTION. You MUST respond with a computer_use tool call. Do NOT respond with text. Start with action='screenshot' if you need to see the screen, or use 'hotkey'/'press'/'type'/'click' directly if the action is clear."})
+        messages.append({"role": "system", "content": (
+            "COWORK MODE — you must physically interact with the screen.\n"
+            "Step 1: Call computer_use with action='screenshot' to see the screen.\n"
+            "Step 2: Based on the screenshot, perform ONE action (click/type/press/hotkey).\n"
+            "Step 3: Wait 2-3s for apps to load, then screenshot again to verify.\n"
+            "Step 4: Repeat until the task is fully done.\n\n"
+            "If native tool calling is unavailable, output ONLY a JSON object:\n"
+            '{"action": "screenshot"}\n'
+            "Do NOT describe actions in text. Do NOT claim the task is done without a verification screenshot."
+        )})
     else:
         messages.append({"role": "user", "content": prompt})
 
@@ -1766,12 +1908,16 @@ AIBrain.MAX_CONTEXT_CHARS = 16000
 AIBrain.MAX_FILE_CHARS = 3200
 AIBrain.OPENROUTER_TEXT_MODELS = [
     "openrouter/free",
-    "deepseek/deepseek-r1:free",
+    "meta-llama/llama-4-scout:free",
+    "mistralai/mistral-small-3.1-24b-instruct:free",
+    "deepseek/deepseek-chat-v3-0324:free",
     "google/gemma-3-27b-it:free",
 ]
 AIBrain.OPENROUTER_VISION_MODELS = [
     "openrouter/free",
+    "meta-llama/llama-4-scout:free",
     "google/gemma-3-27b-it:free",
+    "mistralai/mistral-small-3.1-24b-instruct:free",
 ]
 AIBrain.GROQ_TEXT_MODELS = [
     "llama-3.3-70b-versatile",

@@ -165,10 +165,10 @@ def execute_tool(db, name: str, args: dict) -> str:
                 img = ImageGrab.grab()
                 real_w, real_h = img.size
                 # Scale down for LLM but keep enough detail for coordinate accuracy
-                img.thumbnail((1280, 1280))
+                img.thumbnail((1024, 1024))
                 thumb_w, thumb_h = img.size
                 buffered = BytesIO()
-                img.save(buffered, format="JPEG", quality=60)
+                img.save(buffered, format="JPEG", quality=55)
                 b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
                 return f"[SCREENSHOT DATA BASE64]: data:image/jpeg;base64,{b64}  ... Real screen: {real_w}x{real_h}, thumbnail: {thumb_w}x{thumb_h}. Provide coordinates in REAL screen space ({real_w}x{real_h})."
             
