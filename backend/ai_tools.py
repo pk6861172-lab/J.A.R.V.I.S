@@ -211,8 +211,8 @@ def _take_screenshot() -> str:
     """Capture the screen and return a base64 data URL string."""
     try:
         screenshot = pyautogui.screenshot()
-        # Resize for efficiency (model doesn't need full resolution)
-        max_dim = 1280
+        # Resize for efficiency — keep context small for free models
+        max_dim = 1024
         w, h = screenshot.size
         if w > max_dim or h > max_dim:
             scale = max_dim / max(w, h)
@@ -220,9 +220,11 @@ def _take_screenshot() -> str:
             screenshot = screenshot.resize((new_w, new_h))
 
         buf = io.BytesIO()
-        screenshot.save(buf, format="PNG", optimize=True)
+        # Use JPEG with moderate quality to keep base64 size small
+        screenshot = screenshot.convert("RGB")
+        screenshot.save(buf, format="JPEG", quality=55)
         b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-        data_url = f"data:image/png;base64,{b64}"
+        data_url = f"data:image/jpeg;base64,{b64}"
         return f"[SCREENSHOT DATA BASE64]: {data_url}"
     except Exception as e:
         return f"Screenshot error: {e}"
