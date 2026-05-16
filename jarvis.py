@@ -1232,9 +1232,11 @@ def _aibrain_create_completion(self, messages: list, models: list[str], _depth: 
                     pass  # Don't add tools — model MUST return text
                 else:
                     kwargs["tools"] = tools
-                    # Only force tool_choice on the FIRST call (depth 0) to get started
-                    # After that, let the model decide when to stop and summarize
-                    if force_tools and _depth == 0:
+                    # Force tool_choice for the first several calls to prevent
+                    # the model from bailing out early with a text summary.
+                    # depth 0-3: MUST use tools (getting started + verification)
+                    # depth 4+: model decides when to stop and summarize
+                    if force_tools and _depth < 4:
                         kwargs["tool_choice"] = "required"
 
             resp = self.client.chat.completions.create(**kwargs)
@@ -1299,10 +1301,16 @@ def _aibrain_create_completion(self, messages: list, models: list[str], _depth: 
                         "name": func_name,
                         "content": tool_result
                     })
-                    messages.append({
-                        "role": "system", 
-                        "content": f"Tool '{func_name}' executed. Result: '{tool_result}'. If the user's ORIGINAL task is now COMPLETE, respond with a brief text summary. If more steps are needed, make ONE more tool call. Do NOT repeat actions already done. Do NOT use XML tags."
-                    })
+                    if force_tools and _depth < 6:
+                        messages.append({
+                            "role": "system",
+                            "content": f"Tool '{func_name}' executed. Result: '{tool_result}'. Now take a SCREENSHOT to verify the action worked. Do NOT assume the task is done — you must VISUALLY CONFIRM by taking a screenshot. Do NOT respond with text yet."
+                        })
+                    else:
+                        messages.append({
+                            "role": "system", 
+                            "content": f"Tool '{func_name}' executed. Result: '{tool_result}'. If the user's ORIGINAL task is now COMPLETE (verified by a recent screenshot), respond with a brief text summary. If more steps are needed, make ONE more tool call. Do NOT repeat actions already done. Do NOT use XML tags."
+                        })
                 # Recursively call to summarize or continue tool execution
                 return _aibrain_create_completion(self, messages, [model], _depth=_depth + 1, force_tools=force_tools)
 
@@ -1316,7 +1324,7 @@ def _aibrain_create_completion(self, messages: list, models: list[str], _depth: 
             
             # Anti-hallucination: detect if AI claims it performed physical actions
             # without actually making any tool calls (no tool_calls in response)
-            if reply and tools and _depth <= 2 and force_tools:
+            if reply and tools and _depth <= 5 and force_tools:
                 hallucination_phrases = [
                     "screenshot has been taken", "screenshot taken", "i've taken a screenshot",
                     "i clicked", "i have clicked", "mouse has been", "mouse was moved",
@@ -1514,7 +1522,17 @@ def _aibrain_chat(self, user_input: str, context: str = "") -> str:
     if is_cowork:
         # For cowork: add explicit instruction to use tools
         messages.append({"role": "user", "content": prompt})
-        messages.append({"role": "system", "content": "The user is requesting a PHYSICAL COMPUTER ACTION. You MUST respond with a computer_use tool call. Do NOT respond with text. Start with action='screenshot' if you need to see the screen, or use 'hotkey'/'press'/'type'/'click' directly if the action is clear."})
+        messages.append({"role": "system", "content": (
+            "The user is requesting a PHYSICAL COMPUTER ACTION via Cowork mode. "
+            "You MUST use the computer_use tool to perform REAL actions on the screen. "
+            "WORKFLOW: 1) ALWAYS start with action='screenshot' to see the current screen. "
+            "2) Based on what you see, perform ONE action (click/type/press/hotkey). "
+            "3) Use action='wait' (2-3 seconds) after opening apps to let them load. "
+            "4) Take another screenshot to VERIFY the action worked. "
+            "5) Repeat until the task is fully done. "
+            "NEVER claim the task is done without a verification screenshot showing success. "
+            "Do NOT respond with text — make a tool call NOW."
+        )})
     else:
         messages.append({"role": "user", "content": prompt})
 
@@ -1568,7 +1586,17 @@ def _aibrain_chat_with_references(
     if is_cowork:
         # For cowork: add explicit instruction to use tools (same as chat())
         messages.append({"role": "user", "content": text_payload})
-        messages.append({"role": "system", "content": "The user is requesting a PHYSICAL COMPUTER ACTION. You MUST respond with a computer_use tool call. Do NOT respond with text. Start with action='screenshot' if you need to see the screen, or use 'hotkey'/'press'/'type'/'click' directly if the action is clear."})
+        messages.append({"role": "system", "content": (
+            "The user is requesting a PHYSICAL COMPUTER ACTION via Cowork mode. "
+            "You MUST use the computer_use tool to perform REAL actions on the screen. "
+            "WORKFLOW: 1) ALWAYS start with action='screenshot' to see the current screen. "
+            "2) Based on what you see, perform ONE action (click/type/press/hotkey). "
+            "3) Use action='wait' (2-3 seconds) after opening apps to let them load. "
+            "4) Take another screenshot to VERIFY the action worked. "
+            "5) Repeat until the task is fully done. "
+            "NEVER claim the task is done without a verification screenshot showing success. "
+            "Do NOT respond with text — make a tool call NOW."
+        )})
     elif image_paths:
         content = [{"type": "text", "text": text_payload}]
         for image_path in image_paths[:3]:

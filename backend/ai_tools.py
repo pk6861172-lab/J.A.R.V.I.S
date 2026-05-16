@@ -37,7 +37,7 @@ TOOLS_SCHEMA = [
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["screenshot", "click", "type", "press", "hotkey", "drag"],
+                        "enum": ["screenshot", "click", "type", "press", "hotkey", "drag", "wait"],
                         "description": (
                             "The action to perform. "
                             "'screenshot' captures the screen. "
@@ -45,7 +45,8 @@ TOOLS_SCHEMA = [
                             "'type' types a string of text. "
                             "'press' presses a single key. "
                             "'hotkey' presses a key combination. "
-                            "'drag' drags from (x, y) to (drag_to_x, drag_to_y)."
+                            "'drag' drags from (x, y) to (drag_to_x, drag_to_y). "
+                            "'wait' pauses for 'seconds' (default 2) to let an app load."
                         ),
                     },
                     "x": {
@@ -84,6 +85,10 @@ TOOLS_SCHEMA = [
                     "drag_to_y": {
                         "type": "integer",
                         "description": "Destination Y coordinate (for action='drag').",
+                    },
+                    "seconds": {
+                        "type": "number",
+                        "description": "Seconds to wait (for action='wait'). Default 2, max 10.",
                     },
                 },
                 "required": ["action"],
@@ -130,6 +135,7 @@ def _execute_computer_use(args: dict) -> str:
         button = "right" if right else "left"
         try:
             pyautogui.click(x, y, clicks=clicks, button=button)
+            time.sleep(0.3)
             return f"Clicked {'right' if right else 'left'} at ({x}, {y}), clicks={clicks}."
         except Exception as e:
             return f"Click error: {e}"
@@ -139,18 +145,19 @@ def _execute_computer_use(args: dict) -> str:
         if not text:
             return "Error: type requires 'text' parameter."
         try:
-            # Use clipboard paste for reliability with special characters
-            import subprocess
+            # Use pyperclip (cross-platform) for clipboard paste
             try:
-                process = subprocess.Popen(
-                    ["xclip", "-selection", "clipboard"],
-                    stdin=subprocess.PIPE
-                )
-                process.communicate(text.encode("utf-8"))
+                import pyperclip
+                pyperclip.copy(text)
+                time.sleep(0.1)
                 pyautogui.hotkey("ctrl", "v")
-            except FileNotFoundError:
-                # xclip not available, fall back to typewrite
-                pyautogui.typewrite(text, interval=0.02) if text.isascii() else pyautogui.write(text)
+            except (ImportError, Exception):
+                # pyperclip not available, fall back to typewrite
+                if text.isascii():
+                    pyautogui.typewrite(text, interval=0.02)
+                else:
+                    pyautogui.write(text)
+            time.sleep(0.3)
             return f"Typed: '{text[:80]}{'...' if len(text) > 80 else ''}'"
         except Exception as e:
             return f"Type error: {e}"
@@ -161,6 +168,7 @@ def _execute_computer_use(args: dict) -> str:
             return "Error: press requires 'key' parameter."
         try:
             pyautogui.press(key)
+            time.sleep(0.3)
             return f"Pressed key: '{key}'."
         except Exception as e:
             return f"Press error: {e}"
@@ -171,6 +179,7 @@ def _execute_computer_use(args: dict) -> str:
             return "Error: hotkey requires 'keys' array."
         try:
             pyautogui.hotkey(*keys)
+            time.sleep(0.5)
             return f"Pressed hotkey: {'+'.join(keys)}."
         except Exception as e:
             return f"Hotkey error: {e}"
@@ -189,8 +198,13 @@ def _execute_computer_use(args: dict) -> str:
         except Exception as e:
             return f"Drag error: {e}"
 
+    elif action == "wait":
+        secs = min(args.get("seconds", 2), 10)
+        time.sleep(secs)
+        return f"Waited {secs} seconds."
+
     else:
-        return f"Unknown action: '{action}'. Use: screenshot, click, type, press, hotkey, drag."
+        return f"Unknown action: '{action}'. Use: screenshot, click, type, press, hotkey, drag, wait."
 
 
 def _take_screenshot() -> str:
