@@ -11,7 +11,7 @@
 #  STANDARD LIBRARY
 # ═══════════════════════════════════════════════
 import os, sys, json, time, datetime, subprocess, mimetypes, shutil, queue, ctypes
-import threading, platform, webbrowser, random
+import threading, platform, webbrowser, random, urllib.parse
 import re, socket, imaplib, smtplib, base64
 import email as email_lib
 import csv
@@ -3428,6 +3428,13 @@ class CalendarModule:
 #  INTENT CLASSIFIER
 # ═══════════════════════════════════════════════════════════════
 class Intent:
+    # Patterns for compound commands: "open X and search Y", "open X and go to Y"
+    COMPOUND_OPEN_SEARCH = re.compile(
+        r"^(?:open|launch|start|run)\s+(.+?)\s+(?:and|then)\s+"
+        r"(?:search|search for|google|look up|find|go to|browse|type|enter)\s+(.+)$",
+        re.I,
+    )
+
     MAP = {
         "send_whatsapp":  ["send whatsapp", "whatsapp message", "message on whatsapp", "send a whatsapp", "send message on whatsapp"],
         "send_message":   ["send message to", "message to", "message someone", "send a message", "send text to", "text to"],
@@ -3483,6 +3490,9 @@ class Intent:
     @classmethod
     def classify(cls, text: str) -> str:
         lower = text.lower()
+        # Check compound "open X and search Y" before simple intents
+        if cls.COMPOUND_OPEN_SEARCH.search(text):
+            return "open_and_search"
         for intent, keywords in cls.MAP.items():
             if any(kw in lower for kw in keywords):
                 return intent
@@ -3803,9 +3813,25 @@ class JARVIS:
         elif intent == "date":
             resp = f"Today is {datetime.datetime.now().strftime('%A, %B %d, %Y')}."
 
+        # ── OPEN APP AND SEARCH ────────────────────────
+        elif intent == "open_and_search":
+            m = Intent.COMPOUND_OPEN_SEARCH.search(text)
+            app_name = m.group(1).strip() if m else "chrome"
+            query = m.group(2).strip() if m else ""
+            self.system.open_app(app_name)
+            if query:
+                search_url = "https://www.google.com/search?q=" + urllib.parse.quote_plus(query)
+                time.sleep(1.5)
+                webbrowser.open(search_url)
+                resp = f"Opened {app_name} and searching for '{query}'."
+            else:
+                resp = f"Opening {app_name}."
+
         # ── OPEN APP ──────────────────────────────────
         elif intent == "open_app":
             app = re.sub(r"\b(open|launch|start|run|execute)\b","",lower,flags=re.I).strip()
+            # Strip trailing compound fragments (e.g. "chrome and search ...")
+            app = re.split(r"\s+(?:and|then)\s+", app, maxsplit=1)[0].strip()
             resp = self.system.open_app(app or "chrome")
 
         # ── CLOSE APP ─────────────────────────────────
@@ -4066,7 +4092,7 @@ class JARVIS:
         elif intent == "web_search":
             query = re.sub(r"\b(search for|google|look up|search online|find online)\b","",text,flags=re.I).strip()
             if query:
-                webbrowser.open(f"https://www.google.com/search?q={query}")
+                webbrowser.open("https://www.google.com/search?q=" + urllib.parse.quote_plus(query))
                 resp = f"Searching Google for '{query}'."
             else:
                 resp = "What should I search for?"
