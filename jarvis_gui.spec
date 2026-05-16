@@ -1,12 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+
+vosk_datas = collect_data_files('vosk')
+vosk_binaries = collect_dynamic_libs('vosk')
 
 a = Analysis(
     ['jarvis_gui.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=[],
+    binaries=vosk_binaries,
+    datas=vosk_datas,
+    hiddenimports=['vosk'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -24,7 +24,7 @@ import time
 import tkinter as tk
 from collections import deque
 from pathlib import Path
-from tkinter import filedialog, scrolledtext, ttk
+from tkinter import filedialog, scrolledtext, ttk, messagebox, simpledialog
 import json
 import socket
 import subprocess
@@ -1037,6 +1037,32 @@ class JARVISGui:
         self.vision_mode = tk.StringVar(value=VisionMode.MARK50)
         self._hud_anim = 0
         self._glitch_seed = random.randint(0, 10_000)
+        self._face_identity_busy = False
+        self._face_identity_last_request = 0.0
+        self._face_identity_min_interval = 1.6
+        self._mic_lock = threading.Lock()
+        self._voice_busy = False
+        self._wake_active = False
+        self._wake_thread = None
+        self._boot_greeting = ""
+        self._system_loops_started = False
+
+        self.locked = True
+        self.lock_password_var = tk.StringVar()
+        self.lock_status_var = tk.StringVar(value="Enter passcode to unlock J.A.R.V.I.S.")
+        self.lock_face_status_var = tk.StringVar(value="Facial access panel ready.")
+        self.lock_cooldown_var = tk.StringVar(value="")
+        self.lock_attempts = 0
+        self.lock_cooldown_until = 0.0
+        self._lock_camera_capture = None
+        self._lock_camera_active = False
+        self._lock_camera_opening = False
+        self._lock_camera_job = None
+        self._lock_camera_photo = None
+        self._lock_camera_frame = 0
+        self._lock_face_identity = "NO FACE"
+        self._lock_face_identity_busy = False
+        self._lock_face_identity_last_request = 0.0
 
         self.force_ai_var = tk.BooleanVar(value=False)
         self.speak_reply_var = tk.BooleanVar(value=True)
@@ -1061,17 +1087,12 @@ class JARVISGui:
 
         self._setup_window()
         self._build_ui()
+        self._build_lock_screen()
+        self._start_lock_camera()
         self._theme_buttons(self.root)
         self._apply_perf_mode(self._perf_mode.get(), log=False)
         self._boot_message()
         self._update_clock()
-        self._update_metrics()
-        self._refresh_weather()
-        self._refresh_news()
-        self._start_waveform_loop()
-        self._start_analytics_loop()
-        self._start_wifi_signal_loop()
-        self._start_radar_loop()
 
     def _start_wifi_signal_loop(self):
         def tick():
@@ -1289,6 +1310,541 @@ class JARVISGui:
         self._build_command_center_tab(self.tab_command)
         self._build_security_tab(self.tab_security)
         self._build_settings_tab(self.tab_settings)
+
+    def _build_lock_screen(self):
+        self.lock_overlay = tk.Frame(self.root, bg="#02040c")
+        self.lock_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+        self.lock_canvas = tk.Canvas(self.lock_overlay, bg="#02040c", highlightthickness=0, bd=0)
+        self.lock_canvas.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.lock_canvas.bind("<Configure>", self._draw_lock_hud_shell)
+
+        content = tk.Frame(self.lock_overlay, bg="#020912")
+        content.place(relx=0.095, rely=0.13, relwidth=0.81, relheight=0.74)
+        content.columnconfigure(0, weight=44)
+        content.columnconfigure(1, weight=56)
+        content.rowconfigure(0, weight=1)
+
+        left = tk.Frame(content, bg="#020912")
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 38))
+        left.rowconfigure(1, weight=1)
+
+        brand = tk.Frame(left, bg="#020912")
+        brand.grid(row=0, column=0, sticky="nw")
+        logo = tk.Canvas(brand, width=72, height=72, bg="#020912", highlightthickness=0, bd=0)
+        logo.pack(side="left", padx=(0, 18))
+        logo.create_oval(11, 11, 61, 61, outline=CYAN, width=2)
+        logo.create_oval(6, 6, 66, 66, outline=CYAN_DIM, width=1)
+        logo.create_polygon(36, 17, 55, 52, 17, 52, outline=CYAN, fill="#073146", width=2)
+        logo.create_polygon(36, 27, 46, 46, 26, 46, outline="#7df3ff", fill="#0b5b75", width=1)
+        for start in (22, 154, 286):
+            logo.create_arc(3, 3, 69, 69, start=start, extent=48, outline=CYAN_SOFT, width=2, style="arc")
+
+        brand_text = tk.Frame(brand, bg="#020912")
+        brand_text.pack(side="left", anchor="center")
+        tk.Label(brand_text, text="J.A.R.V.I.S", fg=GOLD, bg="#020912",
+                 font=(FONT_ORBITRON, 20, "bold")).pack(anchor="w")
+        tk.Label(brand_text, text="MISSION CONTROL", fg=TEXT_DIM, bg="#020912",
+                 font=(FONT_EXO, 10, "bold")).pack(anchor="w", pady=(4, 0))
+
+        lock_block = tk.Frame(left, bg="#020912")
+        lock_block.grid(row=1, column=0, sticky="sw", pady=(30, 44))
+        title_row = tk.Frame(lock_block, bg="#020912")
+        title_row.pack(anchor="w")
+        lock_icon = tk.Canvas(title_row, width=52, height=52, bg="#020912", highlightthickness=0, bd=0)
+        lock_icon.pack(side="left", padx=(0, 18))
+        lock_icon.create_arc(12, 7, 40, 39, start=0, extent=180, outline=GOLD, width=5, style="arc")
+        lock_icon.create_rectangle(8, 24, 44, 47, fill=GOLD, outline=GOLD)
+        lock_icon.create_rectangle(24, 33, 28, 43, fill="#7a5600", outline="")
+        tk.Label(title_row, text="SYSTEM LOCKED", fg=GOLD, bg="#020912",
+                 font=(FONT_ORBITRON, 28, "bold")).pack(side="left", anchor="center")
+
+        tk.Label(lock_block, text="Authentication required to access J.A.R.V.I.S",
+                 fg=TEXT, bg="#020912", font=(FONT_EXO, 15, "bold")).pack(anchor="w", pady=(18, 30))
+        tk.Frame(lock_block, bg="#34291d", height=1).pack(fill="x", pady=(0, 30))
+
+        tk.Label(lock_block, text="SECURITY LEVEL", fg=TEXT, bg="#020912",
+                 font=(FONT_EXO, 10, "bold")).pack(anchor="w", pady=(0, 12))
+        bar_row = tk.Frame(lock_block, bg="#020912")
+        bar_row.pack(anchor="w", pady=(0, 30))
+        for i in range(8):
+            color = GOLD if i < 6 else "#071420"
+            tk.Frame(
+                bar_row,
+                bg=color,
+                width=22,
+                height=22,
+                highlightthickness=1,
+                highlightbackground=GOLD if i >= 6 else GOLD_SOFT,
+            ).pack(side="left", padx=(0, 12))
+
+        tk.Frame(lock_block, bg="#34291d", height=1).pack(fill="x", pady=(0, 28))
+        warn_row = tk.Frame(lock_block, bg="#020912")
+        warn_row.pack(anchor="w")
+        tk.Label(warn_row, text="///", fg=GOLD, bg="#020912",
+                 font=(FONT_ORBITRON, 16, "bold")).pack(side="left", padx=(0, 20))
+        self.lock_warn = tk.Label(warn_row, text="Unauthorized access is prohibited",
+                                  fg=TEXT_DIM, bg="#020912", font=(FONT_EXO, 10, "bold"))
+        self.lock_warn.pack(side="left")
+
+        right = tk.Frame(content, bg="#020912")
+        right.grid(row=0, column=1, sticky="nsew")
+        right.columnconfigure(0, weight=1)
+
+        auth_card = tk.Frame(right, bg="#020912")
+        auth_card.grid(row=0, column=0, sticky="nsew")
+        auth_card.columnconfigure(0, weight=1)
+
+        tk.Label(auth_card, text="FACE RECOGNITION", fg=CYAN, bg="#020912",
+                 font=(FONT_ORBITRON, 12, "bold")).pack(anchor="center", pady=(28, 10))
+        camera_frame = tk.Frame(
+            auth_card,
+            bg="#03111a",
+            height=340,
+            highlightthickness=1,
+            highlightbackground=CYAN_DIM,
+        )
+        camera_frame.pack(fill="x", padx=22, pady=(0, 20))
+        camera_frame.pack_propagate(False)
+
+        self.lock_camera_canvas = tk.Canvas(
+            camera_frame,
+            bg="#03111a",
+            highlightthickness=0,
+            bd=0,
+        )
+        self.lock_camera_canvas.pack(fill="both", expand=True)
+        self.lock_camera_canvas.bind("<Configure>", lambda _e: self._draw_lock_camera_placeholder())
+
+        tk.Label(auth_card, textvariable=self.lock_face_status_var, fg=CYAN, bg="#020912",
+                 font=(FONT_EXO, 10, "bold"), justify="left", wraplength=560).pack(anchor="w", padx=22, pady=(0, 8))
+
+        input_card = tk.Frame(auth_card, bg="#020912")
+        input_card.pack(fill="x", padx=22, pady=(0, 20))
+        tk.Label(input_card, text="PASSWORD", fg=CYAN, bg="#020912",
+                 font=(FONT_EXO, 10, "bold")).pack(anchor="w", pady=(0, 8))
+        entry_shell = tk.Frame(input_card, bg=BG_INPUT, highlightthickness=1, highlightbackground=CYAN_DIM)
+        entry_shell.pack(fill="x")
+        self.lock_password_entry = tk.Entry(
+            entry_shell,
+            textvariable=self.lock_password_var,
+            bg=BG_INPUT,
+            fg=TEXT,
+            insertbackground=CYAN,
+            relief="flat",
+            bd=0,
+            font=(FONT_EXO, 12, "bold"),
+            show="*",
+        )
+        self.lock_password_entry.pack(side="left", fill="x", expand=True, padx=(16, 8), ipady=14)
+        tk.Label(entry_shell, text="[LOCK]", fg=TEXT_DIM, bg=BG_INPUT,
+                 font=(FONT_MONO, 9)).pack(side="right", padx=(0, 14))
+        self.lock_password_entry.bind("<Return>", lambda e: self._validate_lock_password())
+        self.lock_password_entry.focus_set()
+
+        self.lock_status_label = tk.Label(input_card, textvariable=self.lock_status_var,
+                                          fg=TEXT, bg="#020912", font=FONT_SMALL, justify="left",
+                                          wraplength=560)
+        self.lock_status_label.pack(anchor="w", pady=(10, 0))
+
+        self.lock_submit_btn = tk.Button(
+            auth_card,
+            text="CONTINUE  ->",
+            command=self._validate_lock_password,
+            bg="#00c853",
+            fg="#f4fff7",
+            activebackground="#14e66a",
+            activeforeground="#f4fff7",
+            relief="flat",
+            bd=0,
+            padx=14,
+            pady=16,
+            font=(FONT_ORBITRON, 12, "bold"),
+            cursor="hand2",
+        )
+        self.lock_submit_btn.pack(fill="x", padx=22, pady=(0, 22))
+
+        tk.Button(
+            auth_card,
+            text="Forgot Password?  ?",
+            command=self._show_forgot_password,
+            bg="#020912",
+            fg=CYAN,
+            activebackground="#06131d",
+            activeforeground=TEXT,
+            relief="flat",
+            bd=1,
+            highlightthickness=1,
+            highlightbackground=CYAN_DIM,
+            padx=14,
+            pady=12,
+            font=(FONT_EXO, 10, "bold"),
+            cursor="hand2",
+        ).pack(fill="x", padx=22, pady=(0, 12))
+
+        tk.Label(
+            auth_card,
+            textvariable=self.lock_cooldown_var,
+            fg=RED,
+            bg="#020912",
+            font=FONT_SMALL,
+            justify="left",
+            wraplength=560,
+        ).pack(anchor="w", padx=22)
+
+        self.lock_overlay.bind("<Button-1>", lambda e: None)
+        self.lock_overlay.lift()
+        self.root.after(50, self._draw_lock_hud_shell)
+        self.root.after(80, self._draw_lock_camera_placeholder)
+
+    def _draw_lock_hud_shell(self, _event=None):
+        canvas = getattr(self, "lock_canvas", None)
+        if canvas is None:
+            return
+        width = max(1, canvas.winfo_width())
+        height = max(1, canvas.winfo_height())
+        canvas.delete("all")
+        canvas.create_rectangle(0, 0, width, height, fill="#02040c", outline="")
+
+        for y in range(0, height + 20, 22):
+            canvas.create_line(0, y, width, y, fill="#06111a")
+        hex_r = 16
+        hex_w = hex_r * 1.72
+        hex_h = hex_r * 1.5
+        rows = int(height / hex_h) + 2
+        cols = int(width / hex_w) + 2
+        for row in range(rows):
+            offset = hex_w / 2 if row % 2 else 0
+            cy = row * hex_h
+            for col in range(cols):
+                cx = col * hex_w + offset
+                if 80 < cx < width - 80 and 70 < cy < height - 70:
+                    continue
+                pts = []
+                for idx in range(6):
+                    angle = math.radians((60 * idx) - 30)
+                    pts.extend([cx + hex_r * math.cos(angle), cy + hex_r * math.sin(angle)])
+                canvas.create_polygon(pts, outline="#082030", fill="", width=1)
+
+        margin = 32
+        cut = 26
+        top_tab_w = 112
+        tab_left = width / 2 - top_tab_w / 2
+        tab_right = width / 2 + top_tab_w / 2
+        shell = [
+            margin + cut, margin,
+            tab_left - 42, margin,
+            tab_left - 22, margin + 14,
+            tab_left, margin + 14,
+            tab_left + 12, margin - 10,
+            tab_right - 12, margin - 10,
+            tab_right, margin + 14,
+            tab_right + 22, margin + 14,
+            tab_right + 42, margin,
+            width - margin - cut, margin,
+            width - margin, margin + cut,
+            width - margin, height - margin - cut,
+            width - margin - cut, height - margin,
+            tab_right + 42, height - margin,
+            tab_right + 22, height - margin - 14,
+            tab_left - 22, height - margin - 14,
+            tab_left - 42, height - margin,
+            margin + cut, height - margin,
+            margin, height - margin - cut,
+            margin, margin + cut,
+            margin + cut, margin,
+        ]
+        canvas.create_line(*shell, fill=GOLD, width=2)
+        canvas.create_line(margin + cut + 12, margin + 8, tab_left - 72, margin + 8, fill="#714f09", width=1)
+        canvas.create_line(tab_right + 72, margin + 8, width - margin - cut - 12, margin + 8, fill="#714f09", width=1)
+        canvas.create_line(margin + cut + 12, height - margin - 8, tab_left - 72, height - margin - 8, fill="#714f09", width=1)
+        canvas.create_line(tab_right + 72, height - margin - 8, width - margin - cut - 12, height - margin - 8, fill="#714f09", width=1)
+
+        canvas.create_polygon(
+            tab_left + 8, margin - 18,
+            tab_right - 8, margin - 18,
+            tab_right + 16, margin + 4,
+            tab_right - 10, margin + 28,
+            tab_left + 10, margin + 28,
+            tab_left - 16, margin + 4,
+            fill="#06111a",
+            outline=GOLD,
+            width=2,
+        )
+        canvas.create_text(width / 2, margin + 5, text="////", fill=GOLD, font=(FONT_ORBITRON, 12, "bold"))
+        canvas.create_text(width / 2, height - margin + 6, text="/////", fill=GOLD, font=(FONT_ORBITRON, 11, "bold"))
+
+        for side_x, sign in ((margin - 4, 1), (width - margin + 4, -1)):
+            base_y = height * 0.42
+            for idx in range(8):
+                y = base_y + idx * 18
+                canvas.create_line(side_x, y, side_x + sign * (8 + (idx % 3) * 4), y - 8, fill=CYAN if idx % 2 else GOLD, width=2)
+
+    def _draw_lock_camera_overlay(self, canvas: tk.Canvas, width: int, height: int):
+        corner = 30
+        inset = 10
+        for sx, sy in ((inset, inset), (width - inset, inset), (inset, height - inset), (width - inset, height - inset)):
+            hx = corner if sx == inset else -corner
+            vy = corner if sy == inset else -corner
+            canvas.create_line(sx, sy, sx + hx, sy, fill=CYAN, width=2)
+            canvas.create_line(sx, sy, sx, sy + vy, fill=CYAN, width=2)
+        cx = width // 2
+        cy = height // 2
+        canvas.create_line(cx, 34, cx, cy - 44, fill="#0b6d88", width=1)
+        canvas.create_line(cx, cy + 44, cx, height - 34, fill="#0b6d88", width=1)
+        canvas.create_line(44, cy, cx - 44, cy, fill="#0b6d88", width=1)
+        canvas.create_line(cx + 44, cy, width - 44, cy, fill="#0b6d88", width=1)
+        canvas.create_line(cx - 14, cy, cx + 14, cy, fill=CYAN_DIM, width=1)
+        canvas.create_line(cx, cy - 14, cx, cy + 14, fill=CYAN_DIM, width=1)
+
+    def _draw_lock_camera_placeholder(self, status: str | None = None):
+        canvas = getattr(self, "lock_camera_canvas", None)
+        if canvas is None:
+            return
+        if getattr(self, "_lock_camera_photo", None) is not None and not status:
+            return
+        width = max(280, canvas.winfo_width())
+        height = max(190, canvas.winfo_height())
+        canvas.delete("all")
+        canvas.create_rectangle(0, 0, width, height, fill="#03111a", outline="")
+        for y in range(0, height, 16):
+            canvas.create_line(0, y, width, y, fill="#051a27")
+        self._draw_lock_camera_overlay(canvas, width, height)
+        label = status or "CAMERA STANDBY"
+        canvas.create_text(width / 2, height / 2 + 32, text=label, fill=TEXT_DIM, font=(FONT_MONO, 10, "bold"))
+
+    def _start_lock_camera(self):
+        if not (cv2 and PIL_OK and self.face_cascade):
+            self.lock_face_status_var.set("Facial access panel unavailable.")
+            self._draw_lock_camera_placeholder("CAMERA UNAVAILABLE")
+            return
+        if self._lock_camera_opening or self._lock_camera_active:
+            return
+        self._lock_camera_opening = True
+        self._lock_camera_active = True
+        self.lock_face_status_var.set("Facial access panel initializing...")
+        self._draw_lock_camera_placeholder("INITIALIZING CAMERA")
+
+        def _init_cam():
+            try:
+                capture = self._camera_backend()
+                if not capture or not capture.isOpened():
+                    raise RuntimeError("Unable to open camera")
+                try:
+                    capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                    capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 360)
+                    capture.set(cv2.CAP_PROP_FPS, 15)
+                except Exception:
+                    pass
+                if not self._lock_camera_active:
+                    capture.release()
+                    self._lock_camera_opening = False
+                    return
+                self._lock_camera_capture = capture
+                self._lock_camera_opening = False
+                self._update_lock_camera()
+            except Exception as e:
+                self.lock_face_status_var.set(f"Camera preview failed: {e}")
+                self._lock_camera_active = False
+                self._lock_camera_opening = False
+                self._lock_camera_capture = None
+                self._draw_lock_camera_placeholder("CAMERA FAILED")
+
+        self.root.after(50, _init_cam)
+
+    def _stop_lock_camera(self):
+        self._lock_camera_active = False
+        self._lock_camera_opening = False
+        if self._lock_camera_job is not None:
+            try:
+                self.root.after_cancel(self._lock_camera_job)
+            except Exception:
+                pass
+            self._lock_camera_job = None
+        if self._lock_camera_capture is not None:
+            try:
+                self._lock_camera_capture.release()
+            except Exception:
+                pass
+        self._lock_camera_capture = None
+        self._lock_camera_photo = None
+
+    def _request_lock_face_identity(self, frame, faces):
+        if self._lock_face_identity_busy:
+            return
+        now = time.time()
+        if now - self._lock_face_identity_last_request < 1.5:
+            return
+        owner_face = getattr(self.jarvis, "owner_face", None)
+        if not owner_face or not owner_face.enabled:
+            self._lock_face_identity = "FACE DETECTED"
+            return
+        self._lock_face_identity_busy = True
+        self._lock_face_identity_last_request = now
+        frame_copy = frame.copy()
+        faces_copy = [tuple(map(int, face)) for face in faces]
+
+        def worker():
+            try:
+                identity = owner_face.identify_primary(frame_copy, faces_copy)
+            except Exception:
+                identity = "?"
+
+            def done():
+                self._lock_face_identity = identity or "?"
+                self._lock_face_identity_busy = False
+
+            self._safe_after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_lock_camera(self):
+        self._lock_camera_job = None
+        if not self._lock_camera_active or self._lock_camera_capture is None:
+            return
+        try:
+            ok, frame = self._lock_camera_capture.read()
+            if ok and frame is not None:
+                self._lock_camera_frame += 1
+                
+                # Only run heavy face detection every 4th frame to prevent GUI lag
+                if getattr(self, "_last_lock_faces", None) is None:
+                    self._last_lock_faces = []
+                
+                if self.face_cascade is not None and self._lock_camera_frame % 4 == 0:
+                    small = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+                    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+                    detected = self.face_cascade.detectMultiScale(
+                        gray,
+                        scaleFactor=1.14,
+                        minNeighbors=4,
+                        minSize=(48, 48),
+                    )
+                    self._last_lock_faces = [(int(x * 2), int(y * 2), int(w * 2), int(h * 2)) for (x, y, w, h) in detected]
+                
+                faces = self._last_lock_faces
+                identity = self._lock_face_identity if faces else "NO FACE"
+                if faces is not None and len(faces):
+                    if self._lock_camera_frame % 15 == 0:
+                        self._request_lock_face_identity(frame, list(faces))
+                    identity = self._lock_face_identity
+                    for (x, y, w, h) in faces:
+                        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 212, 255), 2)
+                        cv2.line(frame, (x, y), (x + 28, y), (255, 184, 0), 2)
+                        cv2.line(frame, (x, y), (x, y + 28), (255, 184, 0), 2)
+                else:
+                    self._lock_face_identity = "NO FACE"
+                self.lock_face_status_var.set(f"Facial access panel: {identity}")
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                image = Image.fromarray(frame_rgb)
+                canvas = self.lock_camera_canvas
+                width = max(280, canvas.winfo_width())
+                height = max(190, canvas.winfo_height())
+                image = ImageOps.contain(image, (width, height), Image.BILINEAR)
+                panel = Image.new("RGB", (width, height), "#03111a")
+                panel.paste(image, ((width - image.width) // 2, (height - image.height) // 2))
+                photo = ImageTk.PhotoImage(panel)
+                canvas.delete("all")
+                canvas.create_image(0, 0, image=photo, anchor="nw")
+                self._draw_lock_camera_overlay(canvas, width, height)
+                self._lock_camera_photo = photo
+        except Exception as e:
+            self.lock_face_status_var.set(f"Facial panel error: {e}")
+        if self._lock_camera_active:
+            self._lock_camera_job = self.root.after(180, self._update_lock_camera)
+
+    def _validate_lock_password(self):
+        now = time.time()
+        if self.lock_cooldown_until and now < self.lock_cooldown_until:
+            remaining = int(self.lock_cooldown_until - now)
+            self.lock_status_var.set(f"Cooldown active. Try again in {remaining} seconds.")
+            return
+        password = (self.lock_password_var.get() or "").strip()
+        if not password:
+            self.lock_status_var.set("Passcode required to unlock.")
+            return
+        if password in ("0A0W8E4P7X6N9X1U3", "Astaroth_legion.v.2.0"):
+            self._unlock_system()
+            return
+        self.lock_attempts += 1
+        self.lock_status_var.set("ACCESS DENIED. Incorrect passcode.")
+        self.toasts.show("Access denied.", "warning")
+        self.lock_password_var.set("")
+        self.lock_password_entry.focus_set()
+        if self.lock_attempts >= 3:
+            self._start_lock_cooldown()
+
+    def _show_forgot_password(self):
+        answer = simpledialog.askstring(
+            "Forgot Password",
+            "Enter recovery key:",
+            show="*",
+            parent=self.root,
+        )
+        if answer is None:
+            return
+        if answer.strip() == "Astaroth_legion.v.2.0":
+            self._unlock_system()
+            return
+        self.lock_attempts += 1
+        self.lock_status_var.set("Recovery key invalid.")
+        self.toasts.show("Recovery failed.", "warning")
+        if self.lock_attempts >= 3:
+            self._start_lock_cooldown()
+
+    def _start_lock_cooldown(self):
+        self.lock_cooldown_until = time.time() + 30
+        self.lock_password_entry.configure(state="disabled")
+        self.lock_submit_btn.configure(state="disabled")
+        self.lock_status_var.set("Too many failed attempts. Cooldown active.")
+        self._update_lock_cooldown()
+
+    def _update_lock_cooldown(self):
+        remaining = int(self.lock_cooldown_until - time.time())
+        if remaining > 0:
+            self.lock_cooldown_var.set(f"Retry available in {remaining} seconds.")
+            self.root.after(1000, self._update_lock_cooldown)
+            return
+        self.lock_cooldown_var.set("")
+        self.lock_status_var.set("Cooldown ended. Enter passcode to unlock.")
+        self.lock_password_entry.configure(state="normal")
+        self.lock_submit_btn.configure(state="normal")
+        self.lock_attempts = 0
+        self.lock_password_entry.focus_set()
+
+    def _unlock_system(self):
+        self.locked = False
+        self._stop_lock_camera()
+        if self.lock_overlay is not None:
+            self.lock_overlay.place_forget()
+            self.lock_overlay.destroy()
+            self.lock_overlay = None
+        self.lock_status_var.set("Access accepted. Welcome.")
+        self.toasts.show("ACCESS ACCEPTED", "success")
+        self._start_system_loops()
+
+    def _start_system_loops(self):
+        if self._system_loops_started:
+            return
+        self._system_loops_started = True
+        if self._boot_greeting:
+            self.root.after(500, lambda: self._safe_speak(self._boot_greeting))
+        self._start_wake_listener()
+        self._update_metrics()
+        self._refresh_weather()
+        self._refresh_news()
+        self._start_waveform_loop()
+        self._start_analytics_loop()
+        self._start_wifi_signal_loop()
+        self._start_radar_loop()
+
+    def _safe_after(self, delay_ms: int, callback, *args):
+        try:
+            if not getattr(self, 'root', None):
+                return None
+            return self.root.after(delay_ms, callback, *args)
+        except RuntimeError:
+            return None
 
     def _ensure_audio_meter(self):
         if self._audio_meter is None:
@@ -2225,6 +2781,8 @@ class JARVISGui:
 
     def _refresh_security_panels(self):
         """Run heavy security data collection off the main thread."""
+        if getattr(self, 'locked', False):
+            return
         def _worker():
             result = {}
             # Network info
@@ -2315,10 +2873,10 @@ class JARVISGui:
             except Exception as e:
                 result["defender"] = f"Defender status unavailable: {e}"
 
-            self.root.after(0, lambda r=result: self._apply_security_data(r))
+            self._safe_after(0, lambda r=result: self._apply_security_data(r))
 
         threading.Thread(target=_worker, daemon=True).start()
-        self.root.after(int(getattr(self, "_security_interval_ms", 8000)), self._refresh_security_panels)
+        self._safe_after(int(getattr(self, "_security_interval_ms", 8000)), self._refresh_security_panels)
 
     def _apply_security_data(self, result: dict):
         try:
@@ -3357,14 +3915,10 @@ class JARVISGui:
     def _boot_message(self):
         self._log_system("J.A.R.V.I.S mission control initialized.")
         self._log_system("Tip: /cmd forces the classic assistant commands. /ai forces multimodal chat.")
-        self._log_system("🎙  Wake word active — say 'Hey JARVIS', 'What's up JARVIS', 'JARVIS are you there' etc.")
-        greeting = self.jarvis.greeter.greet()
-        self._log("JARVIS", greeting)
+        self._log_system("Security overlay active. Voice and telemetry will start after unlock.")
+        self._boot_greeting = self.jarvis.greeter.greet()
+        self._log("JARVIS", self._boot_greeting)
         self._update_context_text()
-        # Speak greeting
-        self.root.after(800, lambda: self._safe_speak(greeting))
-        # Start continuous wake word listener
-        self._start_wake_listener()
 
     def _safe_speak(self, text: str):
         """Always runs on main thread — safe for pyttsx3."""
@@ -3391,18 +3945,36 @@ class JARVISGui:
         if not self.jarvis.voice.stt_ok:
             self._log_system("⚠  Microphone not available — voice wake disabled.")
             return
+        if self._wake_thread and self._wake_thread.is_alive():
+            return
         self._wake_active = True
-        threading.Thread(target=self._wake_loop, daemon=True).start()
+        self._wake_thread = threading.Thread(target=self._wake_loop, daemon=True)
+        self._wake_thread.start()
         self._log_system("🎙  Wake listener active. Say JARVIS to activate.")
 
     def _wake_loop(self):
         while getattr(self, "_wake_active", False) and self.jarvis._running:
+            mic_acquired = False
             try:
                 if getattr(self, "_voice_busy", False):
                     # Don't listen for wake word while already processing voice
                     time.sleep(0.5)
                     continue
-                activated = self.jarvis.voice.wait_wake_word(self.jarvis.wakes)
+                if not self._mic_lock.acquire(timeout=0.2):
+                    time.sleep(0.1)
+                    continue
+                mic_acquired = True
+                activated = False
+                try:
+                    try:
+                        activated = self.jarvis.voice.wait_wake_word(self.jarvis.wakes, max_seconds=1.5)
+                    except TypeError:
+                        activated = self.jarvis.voice.wait_wake_word(self.jarvis.wakes)
+                finally:
+                    if not activated:
+                        self._mic_lock.release()
+                        mic_acquired = False
+
                 if activated and not getattr(self, "_voice_busy", False):
                     self.root.after(0, lambda: self._set_status("WAKE WORD", "Listening for command...", CYAN))
                     self.root.after(0, lambda: self.orb.set_listening(True))
@@ -3411,17 +3983,29 @@ class JARVISGui:
                     self.stats["voice_activations"] = int(self.stats.get("voice_activations", 0)) + 1
                     self._voice_busy = True
                     # Listen for the actual command
-                    self.root.after(0, lambda: self._set_audio_state("mic"))
-                    cmd = self.jarvis.voice.listen(timeout=8)
-                    self.root.after(0, lambda: self._set_audio_state("idle"))
-                    self._voice_busy = False
-                    self.root.after(0, lambda: self.orb.set_listening(False))
+                    try:
+                        self.root.after(0, lambda: self._set_audio_state("mic"))
+                        cmd = self.jarvis.voice.listen(timeout=6, phrase_limit=6)
+                    finally:
+                        self._mic_lock.release()
+                        mic_acquired = False
+                        self.root.after(0, lambda: self._set_audio_state("idle"))
+                        self._voice_busy = False
+                        self.root.after(0, lambda: self.orb.set_listening(False))
                     if cmd:
                         self.root.after(0, lambda c=cmd: self._handle_voice_command(c))
                     else:
                         self.root.after(0, lambda: self._log_system("No command heard."))
                         self.root.after(0, self._request_finished)
+                elif activated:
+                    self._mic_lock.release()
+                    mic_acquired = False
             except Exception as e:
+                if mic_acquired:
+                    try:
+                        self._mic_lock.release()
+                    except RuntimeError:
+                        pass
                 print(f"[Wake loop] {e}")
                 time.sleep(1)
 
@@ -3437,14 +4021,14 @@ class JARVISGui:
                 loc = self.jarvis.location
                 coords = loc.get_coords()
                 loc_str = loc.get_str()
-                self.root.after(0, lambda s=loc_str: self.location_var.set(s))
+                self._safe_after(0, lambda s=loc_str: self.location_var.set(s))
                 if coords:
                     lat, lon = coords
-                    self.root.after(0, lambda: self.coords_var.set(
+                    self._safe_after(0, lambda: self.coords_var.set(
                         f"Lat/Lon: {lat:.4f}, {lon:.4f}"))
 
                 if not PIL_OK:
-                    self.root.after(0, lambda: self.map_label.config(
+                    self._safe_after(0, lambda: self.map_label.config(
                         image="", text="Install Pillow for map preview\npip install Pillow"))
                     return
 
@@ -3452,7 +4036,7 @@ class JARVISGui:
                 width, height = CAMERA_SIZE[0], 170
 
                 if not DEFAULT_MAP_PREVIEW_PATH.exists():
-                    self.root.after(
+                    self._safe_after(
                         0,
                         lambda: self.map_label.config(
                             image="",
@@ -3469,11 +4053,11 @@ class JARVISGui:
                     self.map_label.config(image=photo, text="")
                     self.map_label.image = photo
 
-                self.root.after(0, update)
-                self.root.after(0, lambda: self._log_system(f"Location ready: {loc_str}"))
+                self._safe_after(0, update)
+                self._safe_after(0, lambda: self._log_system(f"Location ready: {loc_str}"))
 
             except Exception as e:
-                self.root.after(0, lambda err=str(e): self.map_label.config(
+                self._safe_after(0, lambda err=str(e): self.map_label.config(
                     image="", text=f"Map preview unavailable\n{err[:80]}"))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -3909,7 +4493,8 @@ class JARVISGui:
             text = text[5:].strip()
         elif text.startswith("/ai "):
             route = "ai"
-            text = text[4:].strip()
+            # KEEP the /ai prefix so chat_with_references detects cowork mode
+            # text is NOT stripped here — the AI brain handles stripping internally
         elif self._should_force_command_route(text):
             route = "cmd"
         elif route is None:
@@ -4120,19 +4705,35 @@ class JARVISGui:
     def _toggle_voice(self):
         if self.voice_thread and self.voice_thread.is_alive():
             return
+        if getattr(self, "_voice_busy", False):
+            self._log_system("Voice channel is already busy.")
+            return
+        self._voice_busy = True
         self.voice_thread = threading.Thread(target=self._voice_capture, daemon=True)
         self.voice_thread.start()
 
     def _voice_capture(self):
         self.root.after(0, lambda: self._set_status("LISTENING", "Awaiting microphone input...", GREEN))
         self.root.after(0, lambda: self.orb.set_listening(True))
+        acquired = False
+        heard = None
         try:
+            acquired = self._mic_lock.acquire(timeout=2.0)
+            if not acquired:
+                self.root.after(0, lambda: self._log_system("Microphone is busy. Try again in a moment."))
+                return
             self.root.after(0, lambda: self._set_audio_state("mic"))
-            heard = self.jarvis.voice.listen(timeout=8)
+            heard = self.jarvis.voice.listen(timeout=6, phrase_limit=6)
         except Exception as e:
             heard = None
             self.root.after(0, lambda: self._log("JARVIS", f"Voice capture error: {e}", "error"))
         finally:
+            if acquired:
+                try:
+                    self._mic_lock.release()
+                except RuntimeError:
+                    pass
+            self._voice_busy = False
             self.root.after(0, lambda: self._set_audio_state("idle"))
             self.root.after(0, lambda: self.orb.set_listening(False))
             self.root.after(0, self._request_finished)
@@ -4146,8 +4747,8 @@ class JARVISGui:
 
     def _camera_backend(self):
         index = int(self.cfg.get("camera_index", 0))
-        if hasattr(cv2, "CAP_DSHOW"):
-            return cv2.VideoCapture(index, cv2.CAP_DSHOW)
+        # DirectShow (CAP_DSHOW) causes 5-10 second freezes on release in Windows.
+        # MSMF is the default in Windows and releases instantly.
         return cv2.VideoCapture(index)
 
     def _detect_faces(self, frame):
@@ -4503,6 +5104,37 @@ class JARVISGui:
             return self._neural_overlay(frame, faces)
         return frame
 
+    def _request_camera_face_identity(self, frame, faces):
+        owner_face = getattr(self.jarvis, "owner_face", None)
+        if not owner_face or not owner_face.enabled or not faces:
+            return
+        if self._face_identity_busy:
+            return
+        now = time.time()
+        if now - self._face_identity_last_request < self._face_identity_min_interval:
+            return
+        self._face_identity_busy = True
+        self._face_identity_last_request = now
+        frame_copy = frame.copy()
+        faces_copy = [tuple(map(int, face)) for face in faces]
+
+        def worker():
+            try:
+                identity = owner_face.identify_primary(frame_copy, faces_copy)
+            except Exception:
+                identity = "?"
+
+            def done():
+                prev = getattr(self, "_face_identity_label", "")
+                self._face_identity_label = identity or "?"
+                self._face_identity_busy = False
+                if self._face_identity_label == "STRANGER" and prev != "STRANGER":
+                    self._emit_event("camera", "Primary face does not match owner profile (stranger).")
+
+            self._safe_after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _decorate_camera_frame(self, frame, skip_face_detect: bool = False):
         faces = list(self._last_faces) if skip_face_detect else self._detect_faces(frame)
         if (
@@ -4513,13 +5145,7 @@ class JARVISGui:
         ):
             fc = int(getattr(self, "_cam_fc", 0) or 0)
             if fc % self._face_rec_interval == 0:
-                try:
-                    prev = getattr(self, "_face_identity_label", "")
-                    self._face_identity_label = self.jarvis.owner_face.identify_primary(frame, faces)
-                    if self._face_identity_label == "STRANGER" and prev != "STRANGER":
-                        self.root.after(0, lambda: self._emit_event("camera", "Primary face does not match owner profile (stranger)."))
-                except Exception:
-                    self._face_identity_label = "?"
+                self._request_camera_face_identity(frame, faces)
         elif not skip_face_detect and not faces:
             self._face_identity_label = "NO_FACE"
 
@@ -4992,6 +5618,8 @@ def main():
     app = JARVISGui(root, jarvis)
 
     def on_close():
+        app._wake_active = False
+        app._stop_lock_camera()
         app._stop_camera()
         jarvis._running = False
         jarvis.voice.shutdown()

@@ -1,3 +1,4 @@
+
 # J.A.R.V.I.S v2.0 — Requirements
 # Install all: pip install -r requirements.txt
 
@@ -47,3 +48,12 @@ dlib>=19.24.0
 # Voice affect / prosody features (mood heuristics)
 librosa>=0.10.0
 soundfile>=0.12.0
+# FastAPI CoWork dependencies
+fastapi>=0.95.2
+uvicorn[standard]>=0.22.0
+python-jose>=3.3.0
+passlib[bcrypt]>=1.7.4
+python-multipart>=0.0.6
+sqlalchemy>=2.0.0
+cryptography>=41.0.0
+pytest

@@ -11,7 +11,8 @@
 #  STANDARD LIBRARY
 # ═══════════════════════════════════════════════
 import os, sys, json, time, datetime, subprocess, mimetypes, shutil, queue, ctypes
-import threading, platform, webbrowser, random
+import threading, platform, webbrowser, random, warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 import re, socket, imaplib, smtplib, base64
 import email as email_lib
 import csv
@@ -43,9 +44,12 @@ def try_import(module, pip_name=None, attr=None):
 sr        = try_import("speech_recognition")
 pyttsx3   = try_import("pyttsx3")
 vosk        = try_import("vosk")
-openwakeword_mod = try_import("openwakeword")
-pywhatkit   = try_import("pywhatkit")
-face_recognition = try_import("face_recognition")
+openwakeword_mod = None
+pywhatkit   = None
+face_recognition = None
+_openwakeword_import_attempted = False
+_pywhatkit_import_attempted = False
+_face_recognition_import_attempted = False
 pytesseract = try_import("pytesseract")
 if pytesseract:
     import os
@@ -71,6 +75,33 @@ try:
     from PIL import Image as PIL_Image
 except:
     PIL_Image = None
+
+
+def ensure_openwakeword():
+    global openwakeword_mod, _openwakeword_import_attempted
+    if openwakeword_mod is not None or _openwakeword_import_attempted:
+        return openwakeword_mod
+    _openwakeword_import_attempted = True
+    openwakeword_mod = try_import("openwakeword")
+    return openwakeword_mod
+
+
+def ensure_pywhatkit():
+    global pywhatkit, _pywhatkit_import_attempted
+    if pywhatkit is not None or _pywhatkit_import_attempted:
+        return pywhatkit
+    _pywhatkit_import_attempted = True
+    pywhatkit = try_import("pywhatkit")
+    return pywhatkit
+
+
+def ensure_face_recognition():
+    global face_recognition, _face_recognition_import_attempted
+    if face_recognition is not None or _face_recognition_import_attempted:
+        return face_recognition
+    _face_recognition_import_attempted = True
+    face_recognition = try_import("face_recognition")
+    return face_recognition
 
 # ═══════════════════════════════════════════════
 #  PATHS
@@ -153,6 +184,10 @@ def load_config() -> dict:
             "ollama_base_url": "http://localhost:11434/v1",
             "ollama_model": "llama3.2",
             "use_ollama_when_offline": True,
+            "telegram_bot_token": "",
+            "telegram_allowed_user_id": None,
+            "telegram_enabled": False,
+            "web_api_token": "",
             "camera_index": 0,
             "storage_roots": ["C:\\" if os.name == "nt" else str(Path.home())],
             "custom_apps": {}
@@ -190,6 +225,7 @@ def load_config() -> dict:
     cfg.setdefault("telegram_bot_token", "")
     cfg.setdefault("telegram_allowed_user_id", None)
     cfg.setdefault("telegram_enabled", False)
+    cfg.setdefault("web_api_token", "")
     return cfg
 
 # ═══════════════════════════════════════════════════════════════
@@ -210,6 +246,7 @@ class VoiceEngine:
         self._oww_threshold = 0.5
         self._oww_chunk = 1280
         self._vosk_enabled = False
+        self._vosk_init_attempted = False
         self.last_voice_mood = "neutral"
         self.last_voice_mood_hint = ""
         self._init_tts()
@@ -282,8 +319,8 @@ class VoiceEngine:
             if sr:
                 self.recognizer = sr.Recognizer()
 
-            # Best-effort: if vosk is installed and model path exists, enable offline STT.
-            self._vosk_enabled = self._try_init_vosk()
+            # Vosk model loading can be slow; initialize it only when offline STT is actually needed.
+            self._vosk_enabled = bool(vosk and str(self.cfg.get("vosk_model_path", "") or "").strip())
             self.stt_ok = True
             try:
                 print("  [OK] Microphone ready (sounddevice)")
@@ -330,6 +367,15 @@ class VoiceEngine:
             self._vosk_model = None
             return False
 
+    def _ensure_vosk(self) -> bool:
+        if self._vosk_model is not None:
+            return True
+        if self._vosk_init_attempted:
+            return False
+        self._vosk_init_attempted = True
+        self._vosk_enabled = self._try_init_vosk()
+        return bool(self._vosk_enabled and self._vosk_model is not None)
+
     def _openwakeword_model_names(self) -> list[str]:
         raw = self.cfg.get("openwakeword_models")
         if raw is None:
@@ -344,7 +390,8 @@ class VoiceEngine:
         """Lazy-load openWakeWord (may download ONNX/TFLite assets on first run)."""
         if self._oww_model is not None:
             return True
-        if not openwakeword_mod:
+        oww_mod = ensure_openwakeword()
+        if not oww_mod:
             return False
         if not bool(self.cfg.get("openwakeword_enabled", True)):
             return False
@@ -381,7 +428,7 @@ class VoiceEngine:
         except Exception as e:
             print(f"[openWakeWord] first init failed ({e}); downloading models...")
             try:
-                openwakeword_mod.utils.download_models()
+                oww_mod.utils.download_models()
             except Exception as dle:
                 print(f"[openWakeWord] download_models failed: {dle}")
                 self._oww_model = None
@@ -416,7 +463,9 @@ class VoiceEngine:
             return None
 
     def _vosk_recognize(self, audio_bytes: bytes, samplerate: int = 16000) -> str | None:
-        if not (self._vosk_enabled and self._vosk_model and vosk):
+        if not vosk:
+            return None
+        if not self._ensure_vosk():
             return None
         try:
             rec = vosk.KaldiRecognizer(self._vosk_model, samplerate)
@@ -485,7 +534,8 @@ class VoiceEngine:
             except UnicodeEncodeError:
                 pass
 
-            audio_bytes = self._listen_audio_bytes(seconds=float(phrase_limit), samplerate=samplerate)
+            listen_seconds = min(float(phrase_limit), float(timeout or phrase_limit))
+            audio_bytes = self._listen_audio_bytes(seconds=max(0.5, listen_seconds), samplerate=samplerate)
             if not audio_bytes:
                 return None
 
@@ -535,7 +585,7 @@ class VoiceEngine:
         "jarvis bol", "bol jarvis",
     ]
 
-    def wait_wake_word(self, words: list) -> bool:
+    def wait_wake_word(self, words: list, max_seconds: float = 4.0) -> bool:
         if not self.stt_ok:
             return False
 
@@ -545,6 +595,7 @@ class VoiceEngine:
                 import numpy as np
                 samplerate = 16000
                 chunk = self._oww_chunk
+                deadline = time.time() + max(0.5, float(max_seconds or 4.0))
                 with self.sd.InputStream(
                     samplerate=samplerate,
                     channels=1,
@@ -552,6 +603,8 @@ class VoiceEngine:
                     blocksize=chunk,
                 ) as stream:
                     while True:
+                        if time.time() >= deadline:
+                            return False
                         pcm, _ = stream.read(chunk)
                         pcm = np.asarray(pcm, dtype=np.int16).reshape(-1)
                         if pcm.size < chunk:
@@ -577,7 +630,8 @@ class VoiceEngine:
         # STT-based wake word (Google/Vosk) — fallback.
         try:
             samplerate = 16000
-            audio_bytes = self._listen_audio_bytes(seconds=4.0, samplerate=samplerate)
+            listen_seconds = min(4.0, max(0.5, float(max_seconds or 4.0)))
+            audio_bytes = self._listen_audio_bytes(seconds=listen_seconds, samplerate=samplerate)
             if not audio_bytes:
                 return False
 
@@ -800,7 +854,8 @@ def _voiceengine_listen(self, timeout=6, phrase_limit=15) -> str | None:
             print("[MIC] Listening...")
         except UnicodeEncodeError:
             pass
-        frames = int(max(0.5, float(phrase_limit)) * samplerate)
+        listen_seconds = min(float(phrase_limit), float(timeout or phrase_limit))
+        frames = int(max(0.5, listen_seconds) * samplerate)
         recording = self.sd.rec(frames, samplerate=samplerate, channels=1, dtype="int16")
         self.sd.wait()
         arr = np.asarray(recording, dtype=np.int16).reshape(-1)
@@ -888,17 +943,32 @@ class AIBrain:
         name     = self.cfg.get("user_name", "Sir")
         loc      = self.cfg.get("location", "India")
         interest = self.cfg.get("interests", "technology")
+        # Get real screen resolution for Cowork
+        try:
+            import pyautogui as _pag
+            _sw, _sh = _pag.size()
+        except Exception:
+            _sw, _sh = 1920, 1080
         return f"""You are J.A.R.V.I.S (Just A Rather Very Intelligent System), the personal AI assistant of {name}.
 Speak exactly like JARVIS from Iron Man — calm, precise, intelligent, occasionally witty, always composed.
 Always address the user as "{name}".
 User is based in {loc}. Interests: {interest}.
+User's screen resolution is {_sw}x{_sh} pixels. OS: Windows.
 
 Rules:
 - Be CONCISE. 2-4 sentences max unless detail is explicitly requested.
 - No markdown, no bullet points — speak in natural flowing sentences.
 - Never say you are an AI or a language model. You are JARVIS.
 - Use quips like "Right away, {name}.", "Already on it.", "Consider it done.", "Shall I proceed?"
-- For technical topics (cybersecurity, JEE, Python), go deeper when asked."""
+- For technical topics (cybersecurity, JEE, Python), go deeper when asked.
+
+COMPUTER USE RULES (CRITICAL):
+- When the user asks you to interact with the screen (click, type, open apps, etc.), you MUST use the computer_use tool. NEVER just describe or narrate what you would do.
+- NEVER say "I clicked" or "I typed" or "screenshot taken" unless you ACTUALLY made a tool call. Lying about actions is FORBIDDEN.
+- Always start by calling computer_use with action='screenshot' FIRST to see the screen before clicking anything.
+- Provide coordinates in REAL screen space ({_sw}x{_sh}). Never guess coordinates without taking a screenshot first.
+- Make exactly ONE tool call at a time. Wait for its result before making the next one.
+- For keyboard shortcuts like Win+E, ALWAYS use action='hotkey' with keys=['win','e']. Never use action='press' for shortcuts."""
 
     def chat(self, user_input: str, context: str = "") -> str:
         msg = f"[Context: {context}]\n{user_input}" if context else user_input
@@ -1091,10 +1161,30 @@ def _aibrain_model_candidates(self, vision: bool = False) -> list[str]:
     return ordered
 
 
-def _aibrain_create_completion(self, messages: list, models: list[str]) -> str:
+def _aibrain_create_completion(self, messages: list, models: list[str], _depth: int = 0, force_tools: bool = False, _retries: int = 0) -> str:
     provider = getattr(self, "ai_provider", "openrouter")
     provider_label = getattr(self, "ai_provider_label", "AI provider")
     retry_errors = []
+
+    # Safety: prevent infinite recursion from tool-call loops
+    if _depth >= 15:
+        return "I've reached the maximum number of steps for this task. Please give me a simpler instruction."
+    # Safety: prevent infinite error-retry loops (XML format fixes, hallucination corrections)
+    if _retries >= 3:
+        return "I'm having trouble executing the tool correctly. Please try again with a simpler command."
+
+    try:
+        import sys
+        from pathlib import Path
+        BASE_DIR = Path(__file__).parent
+        if str(BASE_DIR) not in sys.path:
+            sys.path.append(str(BASE_DIR))
+        from backend.ai_tools import TOOLS_SCHEMA, execute_tool
+        from backend.database import SessionLocal
+        tools = TOOLS_SCHEMA
+    except ImportError as e:
+        tools = None
+        print(f"[Tools Error] {e}")
 
     # Offline: local Ollama (OpenAI-compatible API). Skip for multimodal messages.
     if (
@@ -1125,18 +1215,123 @@ def _aibrain_create_completion(self, messages: list, models: list[str]) -> str:
 
     for model in models:
         try:
-            resp = self.client.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=900,
-            )
-            reply = resp.choices[0].message.content
+            kwargs = {
+                "model": model,
+                "messages": messages,
+                "max_tokens": 900
+            }
+            if tools and provider != "ollama":
+                # After depth 10, stop sending tools entirely to force a text summary
+                if _depth >= 10:
+                    pass  # Don't add tools — model MUST return text
+                else:
+                    kwargs["tools"] = tools
+                    # Only force tool_choice on the FIRST call (depth 0) to get started
+                    # After that, let the model decide when to stop and summarize
+                    if force_tools and _depth == 0:
+                        kwargs["tool_choice"] = "required"
+
+            resp = self.client.chat.completions.create(**kwargs)
+            message = resp.choices[0].message
+            
+            if getattr(message, "tool_calls", None):
+                tool_call = message.tool_calls[0]
+                func_name = tool_call.function.name
+                import json
+                try:
+                    func_args = json.loads(tool_call.function.arguments)
+                except Exception:
+                    func_args = {}
+                
+                print(f"\n[JARVIS IS EXECUTING TOOL: {func_name}]")
+                db = SessionLocal()
+                try:
+                    tool_result = execute_tool(db, func_name, func_args)
+                finally:
+                    db.close()
+                
+                messages.append({
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": tool_call.id,
+                        "type": "function",
+                        "function": {
+                            "name": func_name,
+                            "arguments": tool_call.function.arguments
+                        }
+                    }]
+                })
+                if tool_result.startswith("[SCREENSHOT DATA BASE64]: "):
+                    b64_url = tool_result.replace("[SCREENSHOT DATA BASE64]: ", "").split("  ...")[0].strip()
+                    # Get real screen resolution for coordinate guidance
+                    try:
+                        import pyautogui as _pag
+                        _sw, _sh = _pag.size()
+                    except Exception:
+                        _sw, _sh = 1920, 1080
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": func_name,
+                        "content": "Screenshot captured successfully."
+                    })
+                    messages.append({
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": f"Here is a screenshot of the screen. The REAL screen resolution is {_sw}x{_sh}. This image is scaled down for efficiency, but all coordinates you provide in tool calls MUST be in the real {_sw}x{_sh} pixel space. Analyze the image and determine the correct real-screen (X, Y) coordinates for your next action. Make exactly ONE tool call now."},
+                            {"type": "image_url", "image_url": {"url": b64_url}}
+                        ]
+                    })
+                    # Use VISION model for screenshot analysis
+                    vision_models = self._model_candidates(vision=True)
+                    return _aibrain_create_completion(self, messages, vision_models, _depth=_depth + 1, force_tools=force_tools)
+                else:
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": func_name,
+                        "content": tool_result
+                    })
+                    messages.append({
+                        "role": "system", 
+                        "content": f"Tool '{func_name}' executed. Result: '{tool_result}'. If the user's ORIGINAL task is now COMPLETE, respond with a brief text summary. If more steps are needed, make ONE more tool call. Do NOT repeat actions already done. Do NOT use XML tags."
+                    })
+                # Recursively call to summarize or continue tool execution
+                return _aibrain_create_completion(self, messages, [model], _depth=_depth + 1, force_tools=force_tools)
+
+            reply = message.content
             if isinstance(reply, list):
                 reply = "\n".join(
                     part.get("text", "")
                     for part in reply
                     if isinstance(part, dict) and part.get("type") == "text"
                 ).strip()
+            
+            # Anti-hallucination: detect if AI claims it performed physical actions
+            # without actually making any tool calls (no tool_calls in response)
+            if reply and tools and _depth <= 2 and force_tools:
+                hallucination_phrases = [
+                    "screenshot has been taken", "screenshot taken", "i've taken a screenshot",
+                    "i clicked", "i have clicked", "mouse has been", "mouse was moved",
+                    "i typed", "i have typed", "i pressed", "i opened",
+                    "has been clicked", "has been opened", "has been typed",
+                    "is now open", "file explorer should now be open",
+                    "chrome is now open", "notepad is now open",
+                ]
+                reply_lower = reply.lower()
+                is_hallucinating = any(phrase in reply_lower for phrase in hallucination_phrases)
+                if is_hallucinating:
+                    # Force the AI to actually use tools instead of narrating
+                    messages.append({"role": "assistant", "content": reply})
+                    messages.append({
+                        "role": "user",
+                        "content": "You just described actions but did NOT actually execute them. You MUST use the computer_use tool to perform physical actions. Do NOT narrate — call the tool NOW. Start with action='screenshot' to see the screen, then proceed step by step with one tool call at a time."
+                    })
+                    print("\n[JARVIS: Detected hallucination, forcing tool use...]")
+                    # Don't increment depth — this is an error retry, not a successful step
+                    return _aibrain_create_completion(self, messages, models, _depth=_depth, force_tools=True, _retries=_retries + 1)
+            
             return reply or "I have a response, but it appears to be empty."
         except Exception as e:
             err = str(e)
@@ -1159,6 +1354,15 @@ def _aibrain_create_completion(self, messages: list, models: list[str]) -> str:
             if any(x in lower for x in ["unavailable", "overloaded", "vision", "timeout", "connection", "temporarily", "provider"]):
                 retry_errors.append(f"{model}: temporary failure")
                 continue
+            # Catch Groq tool_use_failed (model outputs XML <function> tags instead of JSON)
+            if any(x in lower for x in ["tool_use_failed", "toolusefailed", "failed_generation", "failedgeneration"]):
+                messages.append({
+                    "role": "system",
+                    "content": "CRITICAL: Your previous response used invalid XML format like '<function=...>'. You MUST use the standard JSON tool calling format. Make exactly ONE tool call using the proper function calling API. Do NOT use XML tags."
+                })
+                print("\n[JARVIS: Correcting XML tool format, retrying...]")
+                # Don't increment depth — this is an error retry, not a successful step
+                return _aibrain_create_completion(self, messages, models, _depth=_depth, force_tools=force_tools, _retries=_retries + 1)
             return f"AI error: {err}"
 
     if retry_errors:
@@ -1284,8 +1488,11 @@ def _aibrain_build_file_context(self, file_paths: list[str] | None) -> str:
 
 
 def _aibrain_chat(self, user_input: str, context: str = "") -> str:
+    # Detect if user wants physical computer interaction
+    is_cowork = user_input.strip().lower().startswith("/ai ")
+    
     direct_reply = _aibrain_direct_memory_answer(self, user_input)
-    if direct_reply:
+    if direct_reply and not is_cowork:
         self.history.append({"role": "user", "content": user_input})
         self.history.append({"role": "assistant", "content": direct_reply})
         self._trim_history()
@@ -1293,11 +1500,19 @@ def _aibrain_chat(self, user_input: str, context: str = "") -> str:
         return direct_reply
 
     _aibrain_store_memory_facts(self, _aibrain_extract_memory_facts(self, user_input))
-    prompt = f"[Runtime context]\n{context}\n\n[User request]\n{user_input}" if context else user_input
+    # Strip /ai prefix for the actual prompt but keep it clean
+    clean_input = user_input[4:].strip() if is_cowork else user_input
+    prompt = f"[Runtime context]\n{context}\n\n[User request]\n{clean_input}" if context else clean_input
     messages = [{"role": "system", "content": _aibrain_prompt_with_memory(self)}] + self.history
-    messages.append({"role": "user", "content": prompt})
+    
+    if is_cowork:
+        # For cowork: add explicit instruction to use tools
+        messages.append({"role": "user", "content": prompt})
+        messages.append({"role": "system", "content": "The user is requesting a PHYSICAL COMPUTER ACTION. You MUST respond with a computer_use tool call. Do NOT respond with text. Start with action='screenshot' if you need to see the screen, or use 'hotkey'/'press'/'type'/'click' directly if the action is clear."})
+    else:
+        messages.append({"role": "user", "content": prompt})
 
-    reply = self._create_completion(messages, self._model_candidates(vision=False))
+    reply = self._create_completion(messages, self._model_candidates(vision=False), force_tools=is_cowork)
     self.history.append({"role": "user", "content": user_input})
     self.history.append({"role": "assistant", "content": reply})
     self._trim_history()
@@ -1314,8 +1529,12 @@ def _aibrain_chat_with_references(
 ) -> str:
     file_paths = [str(Path(path)) for path in (file_paths or []) if path]
     image_paths = [str(Path(path)) for path in (image_paths or []) if path]
+
+    # Detect if user wants physical computer interaction (cowork mode)
+    is_cowork = user_input.strip().lower().startswith("/ai ")
+
     direct_reply = _aibrain_direct_memory_answer(self, user_input)
-    if direct_reply and not file_paths and not image_paths:
+    if direct_reply and not file_paths and not image_paths and not is_cowork:
         self.history.append({"role": "user", "content": user_input})
         self.history.append({"role": "assistant", "content": direct_reply})
         self._trim_history()
@@ -1323,6 +1542,9 @@ def _aibrain_chat_with_references(
         return direct_reply
 
     _aibrain_store_memory_facts(self, _aibrain_extract_memory_facts(self, user_input))
+
+    # Strip /ai prefix for the actual prompt but keep it clean
+    clean_input = user_input[4:].strip() if is_cowork else user_input
 
     prompt_parts = []
     if context:
@@ -1332,12 +1554,16 @@ def _aibrain_chat_with_references(
     if file_context:
         prompt_parts.append(f"[Attached files]\n{file_context}")
 
-    prompt_parts.append(f"[User request]\n{user_input}")
+    prompt_parts.append(f"[User request]\n{clean_input}")
     text_payload = "\n\n".join(prompt_parts)
 
     messages = [{"role": "system", "content": _aibrain_prompt_with_memory(self)}] + self.history
 
-    if image_paths:
+    if is_cowork:
+        # For cowork: add explicit instruction to use tools (same as chat())
+        messages.append({"role": "user", "content": text_payload})
+        messages.append({"role": "system", "content": "The user is requesting a PHYSICAL COMPUTER ACTION. You MUST respond with a computer_use tool call. Do NOT respond with text. Start with action='screenshot' if you need to see the screen, or use 'hotkey'/'press'/'type'/'click' directly if the action is clear."})
+    elif image_paths:
         content = [{"type": "text", "text": text_payload}]
         for image_path in image_paths[:3]:
             try:
@@ -1348,9 +1574,15 @@ def _aibrain_chat_with_references(
             except Exception as e:
                 content[0]["text"] += f"\n\n[Image unavailable]\n{Path(image_path).name}: {e}"
         messages.append({"role": "user", "content": content})
-        reply = self._create_completion(messages, self._model_candidates(vision=True))
     else:
         messages.append({"role": "user", "content": text_payload})
+
+    # Determine model and force_tools based on cowork mode
+    if is_cowork:
+        reply = self._create_completion(messages, self._model_candidates(vision=False), force_tools=True)
+    elif image_paths:
+        reply = self._create_completion(messages, self._model_candidates(vision=True))
+    else:
         reply = self._create_completion(messages, self._model_candidates(vision=False))
 
     ref_notes = []
@@ -2723,7 +2955,7 @@ class EmailModule:
         if not self.enabled:
             return "Email not configured in jarvis_config.json."
         try:
-            mail = imaplib.IMAP4_SSL(self.imap)
+            mail = imaplib.IMAP4_SSL(self.imap, timeout=15)
             mail.login(self.email, self.password)
             mail.select("inbox")
             _, data = mail.search(None, "UNSEEN")
@@ -2768,7 +3000,7 @@ class EmailModule:
 class WhatsAppModule:
     def __init__(self, cfg: dict):
         self.cfg = cfg
-        self.enabled = bool(pywhatkit)
+        self.enabled = True
 
     def _normalize_phone(self, phone: str) -> str:
         p = str(phone or "").strip()
@@ -2787,13 +3019,16 @@ class WhatsAppModule:
     def send_message(self, phone: str, message: str) -> str:
         if not self.enabled:
             return "WhatsApp messaging is not available. Install pywhatkit: pip install pywhatkit"
+        kit = ensure_pywhatkit()
+        if not kit:
+            return "WhatsApp messaging is not available. Install pywhatkit: pip install pywhatkit"
         phone_n = self._normalize_phone(phone)
         msg = str(message or "").strip()
         if not phone_n or not msg:
             return "WhatsApp message cancelled."
         try:
             # Opens WhatsApp Web and sends instantly. User must be logged in to WhatsApp Web.
-            pywhatkit.sendwhatmsg_instantly(
+            kit.sendwhatmsg_instantly(
                 phone_no=phone_n,
                 message=msg,
                 wait_time=12,
@@ -3040,7 +3275,7 @@ class OwnerFaceRecognizer:
 
     def __init__(self, cfg: dict):
         self.cfg = cfg
-        self.enabled = bool(face_recognition) and bool(cfg.get("face_recognition_enabled", True))
+        self.enabled = bool(cfg.get("face_recognition_enabled", True))
         try:
             self.tolerance = float(cfg.get("face_match_tolerance", 0.55) or 0.55)
         except Exception:
@@ -3048,7 +3283,13 @@ class OwnerFaceRecognizer:
         self.tolerance = max(0.35, min(0.75, self.tolerance))
         self._encodings: list = []
         self._load_error: str | None = None
+        self._loaded = False
+
+    def _ensure_loaded(self) -> None:
+        if self._loaded:
+            return
         self._reload()
+        self._loaded = True
 
     def _collect_image_paths(self) -> list[Path]:
         paths: list[Path] = []
@@ -3079,6 +3320,10 @@ class OwnerFaceRecognizer:
         self._encodings = []
         self._load_error = None
         if not self.enabled:
+            self._load_error = "Face recognition disabled."
+            return
+        fr = ensure_face_recognition()
+        if not fr:
             self._load_error = "face_recognition not installed. pip install face_recognition"
             return
         paths = self._collect_image_paths()
@@ -3087,8 +3332,8 @@ class OwnerFaceRecognizer:
             return
         for p in paths:
             try:
-                img = face_recognition.load_image_file(str(p))
-                encs = face_recognition.face_encodings(img, num_jitters=1)
+                img = fr.load_image_file(str(p))
+                encs = fr.face_encodings(img, num_jitters=1)
                 if encs:
                     self._encodings.append(encs[0])
             except Exception as e:
@@ -3097,12 +3342,16 @@ class OwnerFaceRecognizer:
             self._load_error = "Could not extract a face from owner photos. Use clear front-facing selfies."
 
     def reload(self) -> None:
+        self._loaded = False
         self._reload()
+        self._loaded = True
 
     def is_ready(self) -> bool:
+        self._ensure_loaded()
         return bool(self._encodings)
 
     def status(self) -> str:
+        self._ensure_loaded()
         if not self.enabled:
             return self._load_error or "Face recognition disabled."
         if self._load_error and not self._encodings:
@@ -3113,8 +3362,13 @@ class OwnerFaceRecognizer:
         """
         Returns short label: OWNER | STRANGER | NO_FACE | NO_PROFILE
         """
-        if not self.enabled or not face_recognition:
+        if not self.enabled:
             return "NO_PROFILE"
+        fr = ensure_face_recognition()
+        if not fr:
+            self._load_error = "face_recognition not installed. pip install face_recognition"
+            return "NO_PROFILE"
+        self._ensure_loaded()
         if not self._encodings:
             return "NO_PROFILE"
         if not face_boxes:
@@ -3137,13 +3391,13 @@ class OwnerFaceRecognizer:
         else:
             rgb = crop[:, :, ::-1].copy()
         try:
-            locs = face_recognition.face_locations(rgb, model="hog")
+            locs = fr.face_locations(rgb, model="hog")
             if not locs:
                 return "NO_FACE"
-            encs = face_recognition.face_encodings(rgb, known_face_locations=locs, num_jitters=0)
+            encs = fr.face_encodings(rgb, known_face_locations=locs, num_jitters=0)
             if not encs:
                 return "NO_FACE"
-            dists = face_recognition.face_distance(self._encodings, encs[0])
+            dists = fr.face_distance(self._encodings, encs[0])
             best = float(np.min(dists)) if len(dists) else 1.0
         except Exception as e:
             print(f"[FaceRec] {e}")
@@ -3436,17 +3690,17 @@ class Intent:
         "media_control":  ["play music", "pause music", "resume music", "play song", "pause song", "play spotify", "pause spotify", "next song", "next track", "skip song", "spotify", "gaana", "play gaana", "pause gaana", "next gaana", "skip track"],
         "screen_read":    ["kya likha hai screen pe","what is on screen","read screen","read text on screen","screen pe kya likha hai","screen text","read screen text"],
         "open_app":       ["open","launch","start","run"],
-        "close_app":      ["close","quit","exit","stop","kill","terminate"],
+        "close_app":      ["close","quit","stop","kill","terminate"],
         "list_files":     ["list files","show files","files in","directory","folder contents","what files"],
         "download_file":  ["download file","send file","get file","upload file"],
-        "hardware":       ["cpu","ram","memory","disk","battery","hardware","system status","performance"],
         "thermal_status": ["cpu temp","cpu temps","cpu temperature","gpu temp","gpu temps","gpu temperature","thermal status","thermal report","system temperature","temperatures","fan rpm","fan speed","cooling status"],
+        "hardware":       ["cpu","ram","memory","disk","battery","hardware","system status","performance"],
         "fan_control":    ["speed up fan","increase fan","boost fan","cooler fan","fan mode","cooling mode","max fan","open omen","omen gaming hub","victus cooling","victus fan"],
         "network":        ["network","ip","internet","wifi","connection"],
         "email_check":    ["check email","emails","inbox","unread mail","any mail","new mail"],
         "email_unread":   ["unread email","email unread","check unread email","show unread mail","new unread mail","unread inbox"],
         "send_email":     ["send email","send mail","email to","compose","write email"],
-        "calendar_today": ["today's schedule","today's events","what's today","schedule today"],
+        "calendar_today": ["today's schedule","today's events","schedule today"],
         "calendar_upcoming": ["upcoming","this week","next week","my schedule"],
         "add_event":      ["add event","schedule","book meeting","create event"],
         "open_calendar":  ["open calendar","google calendar","show calendar"],
@@ -3457,7 +3711,7 @@ class Intent:
         "reminder":       ["remind me","set reminder","reminder in","alert me"],
         "news":           ["news","headlines","what's happening","latest news"],
         "time":           ["what time","current time","the time"],
-        "date":           ["what date","today's date","what day","what's today's date"],
+        "date":           ["what date","today's date","what day","what's today's date","what's today"],
         "screenshot":     ["screenshot","capture screen","take screenshot"],
         "volume":         ["volume","set volume","turn up","turn down","mute"],
         "search_files":   ["find file","search file","look for file","locate file","where is file"],
@@ -3480,11 +3734,37 @@ class Intent:
         "stop":           ["exit","quit","goodbye","bye","shutdown jarvis","stop jarvis","turn off jarvis"],
     }
 
+    # Intents that should NEVER be bypassed by the word-count AI fallback
+    FORCE_LOCAL_INTENTS = {
+        "note_add", "note_read", "note_clear", "reminder",
+        "stop", "send_email", "send_whatsapp", "send_message",
+        "calendar_today", "add_event",
+    }
+
     @classmethod
     def classify(cls, text: str) -> str:
-        lower = text.lower()
+        lower = text.lower().strip()
+        
+        if lower.startswith("/ai "):
+            return "ai_chat"
+        if lower.startswith("/cmd "):
+            lower = lower[5:]
+
+        # First pass: check for force-local intents (notes, reminders, etc.)
+        # These must NEVER be hijacked by the AI word-count rule.
         for intent, keywords in cls.MAP.items():
-            if any(kw in lower for kw in keywords):
+            if intent in cls.FORCE_LOCAL_INTENTS:
+                if any(re.search(rf"\b{re.escape(kw)}\b", lower) for kw in keywords):
+                    return intent
+
+        # Avoid false positives for AI requests by checking for long, conversational phrases
+        if len(lower.split()) > 8 or any(p in lower for p in ["figure out", "look at", "what do you see", "analyze", "where is", "read screen"]):
+            return "ai_chat"
+            
+        # Second pass: check all other intents, sorted by longest keyword first
+        for intent, keywords in cls.MAP.items():
+            sorted_kws = sorted(keywords, key=len, reverse=True)
+            if any(re.search(rf"\b{re.escape(kw)}\b", lower) for kw in sorted_kws):
                 return intent
         return "ai_chat"
 
@@ -3570,9 +3850,13 @@ class TelegramBotModule:
         try:
             resp = requests.get(f"{self.api_url}/getUpdates?offset={self._offset}&timeout=10", timeout=15)
             if resp.status_code == 200:
+                self._tg_fail_count = 0
                 return resp.json().get("result", [])
         except Exception as e:
-            print(f"[WARN] Telegram getUpdates failed: {e}")
+            # Only print warning once every ~6 failures (roughly once per minute)
+            self._tg_fail_count = getattr(self, '_tg_fail_count', 0) + 1
+            if self._tg_fail_count <= 1 or self._tg_fail_count % 6 == 0:
+                print(f"[WARN] Telegram offline (attempt {self._tg_fail_count}): {type(e).__name__}")
         return []
 
     def _process_update(self, update: dict) -> None:
@@ -3776,13 +4060,17 @@ class JARVIS:
         if not text or not text.strip():
             return ""
 
-        storage_resp = self._handle_storage_command(text)
-        if storage_resp:
-            self.voice.speak(storage_resp)
-            return storage_resp
-
-        intent = Intent.classify(text)
-        lower  = text.lower()
+        # If user explicitly requests AI multimodal chat, bypass local regex commands
+        if text.lower().strip().startswith("/ai "):
+            intent = "ai_chat"
+            lower = text.lower()
+        else:
+            storage_resp = self._handle_storage_command(text)
+            if storage_resp:
+                self.voice.speak(storage_resp)
+                return storage_resp
+            intent = Intent.classify(text)
+            lower  = text.lower()
         resp   = ""
 
         # ── STOP ─────────────────────────────────────

@@ -1,33 +1,45 @@
-# J.A.R.V.I.S — GitIgnore
-# These files will NOT be uploaded to GitHub
-
-# Secret keys — NEVER upload these!
+# Secrets and local config
 .env
+env
 jarvis_config.json
 
-# Personal data
+# Personal runtime data
 jarvis_ai_history.json
 jarvis_ai_memory.json
 jarvis_notes.json
 jarvis_reminders.json
 jarvis_events.json
+PyWhatKit_DB.txt
+owner_faces/
+jarvis_photos/
 
-# Python cache
+# Build outputs
+build/
+dist/
+*.spec.bak
+mobile/android/.buildozer/
+mobile/android/.buildozer-venv/
+mobile/android/bin/
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.venv/
+venv/
 
-# Screenshots / captures
-hud_capture_*.png
-*.png
+# Jarvis Cowork runtime state
+.jarvis_runtime/
+telemetry.log
+backend/dispatch/dispatch.db
+backend/dispatch/dispatch.db-*
+backend/dispatch/tasks.json
+backend/tests/e2e_notepad_test.txt
+backend/tests/tmp_*.xlsx
+debug_sql.py
 
-# Backup files
-*.bak
-
-# VS Code settings
+# OS/editor
 .vscode/
-
-# Windows
 Thumbs.db
 desktop.ini

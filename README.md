@@ -126,7 +126,66 @@ python jarvis.py --mode text
 
 # Telegram bot only (control from phone)
 python run_jarvis_bot.py
+
+# Web/PWA interface on this computer
+python jarvis_web.py --host 127.0.0.1 --port 8765
 ```
+
+Open: http://localhost:8765
+
+For phone access on the same Wi-Fi, set a LAN token and run the web bridge on all interfaces:
+
+```powershell
+$env:JARVIS_WEB_TOKEN="choose-a-long-token"
+python jarvis_web.py --host 0.0.0.0 --port 8765
+```
+
+Then open `http://YOUR-PC-LAN-IP:8765` on the phone, save the token in the web UI, and install it as a PWA from the browser menu.
+
+---
+
+## 🌐 Cross-Platform Builds
+
+JARVIS now has three deployable surfaces:
+
+| Target | What to use | Output |
+|---|---|---|
+| Web / PWA | `jarvis_web.py` + `web/` | Browser app, installable PWA |
+| Windows desktop | `scripts/build_windows_exe.ps1` | `.exe` in `dist/` |
+| macOS desktop | `scripts/build_macos_app.sh` on macOS | `.app` in `dist/` |
+| Android | `mobile/android` + Buildozer | `.apk` in `mobile/android/bin/` |
+| iOS | PWA now, native build requires macOS + Xcode | Installable web app or signed native app |
+
+### Build Windows EXE
+
+```powershell
+.\scripts\build_windows_exe.ps1 -Target all
+```
+
+Outputs:
+- `dist/JARVIS/` for the desktop GUI build
+- `dist/JARVIS-Web.exe` for the web bridge build
+
+### Build Android APK
+
+Buildozer needs Linux or WSL:
+
+```bash
+./scripts/build_android_apk.sh
+```
+
+The Android app is a companion controller. Keep JARVIS running on the PC with `jarvis_web.py`, then set the mobile app server URL to `http://YOUR-PC-LAN-IP:8765`.
+If the first build needs system packages, install `python3-venv`, `openjdk-17-jdk`, `zip`, `unzip`, and `git` inside WSL/Linux, then rerun the script.
+
+### Build macOS App
+
+Run this on a Mac:
+
+```bash
+./scripts/build_macos_app.sh
+```
+
+Apple signing/notarization and iOS device builds must be done from macOS with Xcode.
 
 ---
 
