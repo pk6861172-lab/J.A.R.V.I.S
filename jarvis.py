@@ -1251,7 +1251,7 @@ def _aibrain_create_completion(self, messages: list, models: list[str], _depth: 
                 except Exception:
                     func_args = {}
                 
-                print(f"\n[JARVIS IS EXECUTING TOOL: {func_name}]")
+                print(f"\n[JARVIS IS EXECUTING TOOL: {func_name}] (step {_depth + 1})")
                 db = SessionLocal()
                 try:
                     tool_result = execute_tool(db, func_name, func_args)
@@ -1322,28 +1322,52 @@ def _aibrain_create_completion(self, messages: list, models: list[str], _depth: 
                     if isinstance(part, dict) and part.get("type") == "text"
                 ).strip()
             
+            # COWORK GUARD: In cowork mode at low depth, the model should
+            # NEVER return text — it must make tool calls. If it returns
+            # text anyway (model ignoring tool_choice, or hallucinating),
+            # reject the response and force a tool call retry.
+            if reply and force_tools and _depth < 4 and _retries < 3:
+                messages.append({"role": "assistant", "content": reply})
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "STOP. You responded with text instead of making a tool call. "
+                        "You have NOT completed the task yet. You MUST call the computer_use "
+                        "tool to physically interact with the screen. Start by calling "
+                        "computer_use with action='screenshot' to see the current screen state, "
+                        "then perform the necessary actions step by step. Do NOT respond with text."
+                    )
+                })
+                print(f"\n[JARVIS: Model returned text at step {_depth + 1} instead of tool call, forcing retry ({_retries + 1}/3)...]")
+                return _aibrain_create_completion(self, messages, models, _depth=_depth, force_tools=True, _retries=_retries + 1)
+
             # Anti-hallucination: detect if AI claims it performed physical actions
-            # without actually making any tool calls (no tool_calls in response)
-            if reply and tools and _depth <= 5 and force_tools:
+            # without actually making any tool calls (at higher depths too)
+            if reply and tools and _depth <= 8 and force_tools and _retries < 3:
                 hallucination_phrases = [
                     "screenshot has been taken", "screenshot taken", "i've taken a screenshot",
                     "i clicked", "i have clicked", "mouse has been", "mouse was moved",
                     "i typed", "i have typed", "i pressed", "i opened",
                     "has been clicked", "has been opened", "has been typed",
-                    "is now open", "file explorer should now be open",
+                    "is now open", "are now open", "now open in",
+                    "file explorer should now be open",
                     "chrome is now open", "notepad is now open",
+                    "i have opened", "successfully opened", "has been launched",
+                    "search results for", "results are now",
                 ]
                 reply_lower = reply.lower()
                 is_hallucinating = any(phrase in reply_lower for phrase in hallucination_phrases)
                 if is_hallucinating:
-                    # Force the AI to actually use tools instead of narrating
                     messages.append({"role": "assistant", "content": reply})
                     messages.append({
                         "role": "user",
-                        "content": "You just described actions but did NOT actually execute them. You MUST use the computer_use tool to perform physical actions. Do NOT narrate — call the tool NOW. Start with action='screenshot' to see the screen, then proceed step by step with one tool call at a time."
+                        "content": (
+                            "You described actions but did NOT actually execute them with tool calls. "
+                            "You MUST use the computer_use tool. Call it NOW with action='screenshot' "
+                            "to see the screen, then proceed step by step."
+                        )
                     })
-                    print("\n[JARVIS: Detected hallucination, forcing tool use...]")
-                    # Don't increment depth — this is an error retry, not a successful step
+                    print(f"\n[JARVIS: Detected hallucination at step {_depth + 1}, forcing tool use...]")
                     return _aibrain_create_completion(self, messages, models, _depth=_depth, force_tools=True, _retries=_retries + 1)
             
             return reply or "I have a response, but it appears to be empty."
