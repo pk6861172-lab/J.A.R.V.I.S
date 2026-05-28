@@ -96,6 +96,8 @@ Copy `jarvis_config.template.json` → rename to `jarvis_config.json` and fill i
 }
 ```
 
+> Important: `jarvis_config.json` is a private local file. It must never be uploaded to GitHub. This repository tracks only `jarvis_config.template.json`, which contains placeholders and safe defaults.
+
 #### Get API Keys (all free):
 | Service | Link |
 |---|---|
@@ -117,6 +119,19 @@ JARVIS is designed to be safe to share as source code, but each user must config
 - Camera, screen, email, WhatsApp, Telegram, and system-control features should be enabled only on a computer you own and consent to operate.
 
 If you fork this project, create your own config from the templates and rotate any secret that was ever committed, pasted into chat, or shown publicly.
+
+#### Repository Credential Check
+
+The public repository should contain no real API keys, passwords, Telegram bot tokens, email app passwords, OAuth tokens, private certificates, browser sessions, face images, or generated runtime state. Before publishing your own fork, run a secret scan and confirm these files stay local only:
+
+- `jarvis_config.json`
+- `.env`
+- `jarvis_mobile_settings.json`
+- `.jarvis_runtime/`
+- `owner_faces/`
+- `jarvis_photos/`
+- `uploads/`
+- `scripts/backend/certs/`
 
 #### Gmail App Password:
 1. myaccount.google.com → Security
