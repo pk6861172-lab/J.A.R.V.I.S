@@ -275,7 +275,7 @@ Apple signing/notarization and iOS device builds must be done from macOS with Xc
 | "Describe what you see" | AI vision analysis |
 
 ### AI Conversation
-Anything else goes directly to Claude AI:
+Anything else goes directly to AGentic AI:
 - "Explain recursion to me"
 - "Help me write a Python function"
 - "What's the difference between TCP and UDP?"
@@ -394,11 +394,11 @@ Offline:   Ollama (local LLM)
 - [x] Offline STT (Vosk)
 - [x] Face recognition
 - [x] Ollama offline LLM
-- [ ] Custom trained wake word
-- [ ] Emotion detection (librosa)
-- [ ] Windows EXE package
-- [ ] Android APK release
-- [ ] Screen reader (OCR full)
+- [x] Custom trained wake word
+- [x] Emotion detection (librosa)
+- [x] Windows EXE package
+- [x] Android APK release
+- [x] Screen reader (OCR full)
 
 ---
 
