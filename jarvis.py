@@ -1937,6 +1937,46 @@ def _aibrain_create_completion(self, messages: list, models: list[str], _depth: 
                         })
                         return _aibrain_create_completion(self, messages, models, _depth=_depth + 1, force_tools=force_tools)
 
+            # ── ANTI-HALLUCINATION (check FIRST, before cowork guard) ─
+            # Detect if AI claims it performed physical actions
+            # without actually making any tool calls.  This runs
+            # independently of retry count so it always catches lies.
+            if reply and force_tools and _depth <= 8:
+                hallucination_phrases = [
+                    "screenshot has been taken", "screenshot taken", "i've taken a screenshot",
+                    "i clicked", "i have clicked", "mouse has been", "mouse was moved",
+                    "i typed", "i have typed", "i pressed", "i opened",
+                    "has been clicked", "has been opened", "has been typed",
+                    "is now open", "are now open", "now open in",
+                    "file explorer should now be open",
+                    "chrome is now open", "notepad is now open",
+                    "i have opened", "successfully opened", "has been launched",
+                    "search results for", "results are now",
+                    "task is complete", "task has been completed",
+                    "done for you", "completed the task",
+                ]
+                reply_lower = reply.lower()
+                is_hallucinating = any(phrase in reply_lower for phrase in hallucination_phrases)
+                if is_hallucinating:
+                    print(f"\n[COWORK] Hallucination detected at depth {_depth} retries={_retries}: {reply[:120]}...")
+                    if _retries < 4:
+                        messages.append({"role": "assistant", "content": reply})
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "You described actions but did NOT actually execute them. "
+                                "You MUST use the computer_use tool or output a JSON object. "
+                                'Start with: {"action": "screenshot"}'
+                            )
+                        })
+                        return _aibrain_create_completion(self, messages, models, _depth=_depth, force_tools=True, _retries=_retries + 1)
+                    else:
+                        return (
+                            f"I wasn't able to complete the screen interaction, {getattr(self, 'name', 'sir')}. "
+                            "The AI model couldn't reliably control the computer. "
+                            "Try a simpler command or use /ai with a specific action."
+                        )
+
             # ── COWORK GUARD ──────────────────────────────────────
             # In cowork mode at low depth the model should be making
             # tool calls, not returning text.  Reject and retry,
@@ -1955,38 +1995,6 @@ def _aibrain_create_completion(self, messages: list, models: list[str], _depth: 
                     )
                 })
                 return _aibrain_create_completion(self, messages, models, _depth=_depth, force_tools=True, _retries=_retries + 1)
-
-            # ── ANTI-HALLUCINATION ────────────────────────────────
-            # Detect if AI claims it performed physical actions
-            # without actually making any tool calls.
-            if reply and tools and _depth <= 8 and force_tools and _retries < 3:
-                hallucination_phrases = [
-                    "screenshot has been taken", "screenshot taken", "i've taken a screenshot",
-                    "i clicked", "i have clicked", "mouse has been", "mouse was moved",
-                    "i typed", "i have typed", "i pressed", "i opened",
-                    "has been clicked", "has been opened", "has been typed",
-                    "is now open", "are now open", "now open in",
-                    "file explorer should now be open",
-                    "chrome is now open", "notepad is now open",
-                    "i have opened", "successfully opened", "has been launched",
-                    "search results for", "results are now",
-                    "task is complete", "task has been completed",
-                    "done for you", "completed the task",
-                ]
-                reply_lower = reply.lower()
-                is_hallucinating = any(phrase in reply_lower for phrase in hallucination_phrases)
-                if is_hallucinating:
-                    print(f"\n[COWORK] Hallucination detected at depth {_depth}: {reply[:120]}...")
-                    messages.append({"role": "assistant", "content": reply})
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            "You described actions but did NOT actually execute them. "
-                            "You MUST use the computer_use tool or output a JSON object. "
-                            'Start with: {"action": "screenshot"}'
-                        )
-                    })
-                    return _aibrain_create_completion(self, messages, models, _depth=_depth, force_tools=True, _retries=_retries + 1)
             
             return reply or "I have a response, but it appears to be empty."
         except Exception as e:
@@ -2143,11 +2151,144 @@ def _aibrain_build_file_context(self, file_paths: list[str] | None) -> str:
     return "\n\n".join(sections)
 
 
+# ═══════════════════════════════════════════════════════════════
+#  COWORK DIRECT ACTIONS — reliable fallback for common patterns
+# ═══════════════════════════════════════════════════════════════
+_COWORK_BROWSER_SEARCH_RE = re.compile(
+    r"open\s+(?:google\s+)?chrome\s+and\s+(?:search|search\s+for|google|look\s+up|find)\s+(?:for\s+)?['\"]?(.+?)['\"]?\s*$",
+    re.I,
+)
+_COWORK_BROWSER_GOTO_RE = re.compile(
+    r"open\s+(?:google\s+)?chrome\s+and\s+(?:go\s+to|open|visit|navigate\s+to)\s+['\"]?(https?://\S+|www\.\S+|\S+\.\w{2,})['\"]?\s*$",
+    re.I,
+)
+_COWORK_SEARCH_RE = re.compile(
+    r"(?:search|search\s+for|google|look\s+up|find)\s+(?:for\s+)?['\"]?(.+?)['\"]?\s*(?:on\s+(?:google|chrome|the\s+web|internet))?\s*$",
+    re.I,
+)
+_COWORK_OPEN_APP_RE = re.compile(
+    r"open\s+(.+?)$",
+    re.I,
+)
+_COWORK_TYPE_SEARCH_RE = re.compile(
+    r"open\s+(?:google\s+)?chrome\s+and\s+(?:type|write|enter)\s+(?:in\s+(?:the\s+)?search\s+bar\s+)?['\"]?(.+?)['\"]?\s*$",
+    re.I,
+)
+
+def _cowork_direct_action(self, user_input: str) -> str | None:
+    """Handle common /ai cowork patterns directly via subprocess/webbrowser.
+
+    Returns a response string if the pattern matched and was executed,
+    or None to fall through to the AI-driven tool-call loop.
+    """
+    raw = re.sub(r"^/(?:ai|cowork|computer)\s+", "", user_input, flags=re.I).strip()
+    if not raw:
+        return None
+
+    cfg = getattr(self, "cfg", {})
+    name = cfg.get("user_name", "sir")
+
+    # Pattern: "open chrome and search X"
+    m = _COWORK_BROWSER_SEARCH_RE.match(raw)
+    if m:
+        query = m.group(1).strip().strip("'\"")
+        try:
+            import urllib.parse
+            url = f"https://www.google.com/search?q={urllib.parse.quote_plus(query)}"
+            webbrowser.open(url)
+            return f"Searching Google for '{query}', {name}. Chrome should be opening now."
+        except Exception as e:
+            return f"Failed to open Chrome for search: {e}"
+
+    # Pattern: "open chrome and type in search bar 'X'"
+    m = _COWORK_TYPE_SEARCH_RE.match(raw)
+    if m:
+        query = m.group(1).strip().strip("'\"")
+        try:
+            import urllib.parse
+            url = f"https://www.google.com/search?q={urllib.parse.quote_plus(query)}"
+            webbrowser.open(url)
+            return f"Searching for '{query}' in Chrome, {name}."
+        except Exception as e:
+            return f"Failed to open Chrome: {e}"
+
+    # Pattern: "open chrome and go to URL"
+    m = _COWORK_BROWSER_GOTO_RE.match(raw)
+    if m:
+        url = m.group(1).strip()
+        if not url.startswith("http"):
+            url = "https://" + url
+        try:
+            webbrowser.open(url)
+            return f"Opening {url} in Chrome, {name}."
+        except Exception as e:
+            return f"Failed to open URL: {e}"
+
+    # Pattern: "search for X" (without specifying app)
+    m = _COWORK_SEARCH_RE.match(raw)
+    if m:
+        query = m.group(1).strip().strip("'\"")
+        if query and len(query) > 1:
+            try:
+                import urllib.parse
+                url = f"https://www.google.com/search?q={urllib.parse.quote_plus(query)}"
+                webbrowser.open(url)
+                return f"Searching Google for '{query}', {name}."
+            except Exception as e:
+                return f"Failed to search: {e}"
+
+    # Pattern: "open <app_name>" — use custom_apps from config
+    m = _COWORK_OPEN_APP_RE.match(raw)
+    if m:
+        app_name = m.group(1).strip().lower()
+        custom_apps = cfg.get("custom_apps", {})
+        cmd = custom_apps.get(app_name)
+        if cmd and not cmd.startswith("_"):
+            try:
+                import subprocess
+                if os.name == "nt":
+                    subprocess.Popen(cmd, shell=True)
+                else:
+                    subprocess.Popen(cmd, shell=True)
+                return f"Opening {app_name}, {name}."
+            except Exception as e:
+                return f"Failed to open {app_name}: {e}"
+        # If the app name contains "and", don't match — let AI handle it
+        if " and " in app_name:
+            return None
+        # Fallback: try system open_app if available
+        system = getattr(self, "_system_module", None)
+        if system and hasattr(system, "open_app"):
+            try:
+                result = system.open_app(app_name)
+                return result
+            except Exception:
+                pass
+
+    return None
+
+
 def _aibrain_chat(self, user_input: str, context: str = "") -> str:
     # Detect if user wants physical computer interaction
     lowered_input = user_input.strip().lower()
-    is_cowork = lowered_input.startswith("/cowork ") or lowered_input.startswith("/computer ")
+    is_cowork = (
+        lowered_input.startswith("/cowork ")
+        or lowered_input.startswith("/computer ")
+        or lowered_input.startswith("/ai ")
+    )
     
+    # For /ai cowork commands, try direct execution first for reliability.
+    # Free AI models are unreliable at chaining tool calls, so we handle
+    # common patterns (open app + search) directly via subprocess/webbrowser.
+    if is_cowork:
+        direct_result = _cowork_direct_action(self, user_input)
+        if direct_result:
+            self.history.append({"role": "user", "content": user_input})
+            self.history.append({"role": "assistant", "content": direct_result})
+            self._trim_history()
+            _aibrain_persist_state(self)
+            return direct_result
+
     direct_reply = _aibrain_direct_memory_answer(self, user_input)
     if direct_reply and not is_cowork:
         self.history.append({"role": "user", "content": user_input})
@@ -2159,9 +2300,7 @@ def _aibrain_chat(self, user_input: str, context: str = "") -> str:
     _aibrain_store_memory_facts(self, _aibrain_extract_memory_facts(self, user_input))
     # Strip command prefixes for the actual prompt but keep the mode explicit.
     if is_cowork:
-        clean_input = re.sub(r"^/(?:cowork|computer)\s+", "", user_input, flags=re.I).strip()
-    elif lowered_input.startswith("/ai "):
-        clean_input = user_input[4:].strip()
+        clean_input = re.sub(r"^/(?:cowork|computer|ai)\s+", "", user_input, flags=re.I).strip()
     else:
         clean_input = user_input
     prompt = f"[Runtime context]\n{context}\n\n[User request]\n{clean_input}" if context else clean_input
@@ -2205,7 +2344,20 @@ def _aibrain_chat_with_references(
 
     # Detect if user wants physical computer interaction (cowork mode)
     lowered_input = user_input.strip().lower()
-    is_cowork = lowered_input.startswith("/cowork ") or lowered_input.startswith("/computer ")
+    is_cowork = (
+        lowered_input.startswith("/cowork ")
+        or lowered_input.startswith("/computer ")
+        or lowered_input.startswith("/ai ")
+    )
+
+    if is_cowork:
+        direct_result = _cowork_direct_action(self, user_input)
+        if direct_result:
+            self.history.append({"role": "user", "content": user_input})
+            self.history.append({"role": "assistant", "content": direct_result})
+            self._trim_history()
+            _aibrain_persist_state(self)
+            return direct_result
 
     direct_reply = _aibrain_direct_memory_answer(self, user_input)
     if direct_reply and not file_paths and not image_paths and not is_cowork:
@@ -2219,9 +2371,7 @@ def _aibrain_chat_with_references(
 
     # Strip command prefixes for the actual prompt but keep the mode explicit.
     if is_cowork:
-        clean_input = re.sub(r"^/(?:cowork|computer)\s+", "", user_input, flags=re.I).strip()
-    elif lowered_input.startswith("/ai "):
-        clean_input = user_input[4:].strip()
+        clean_input = re.sub(r"^/(?:cowork|computer|ai)\s+", "", user_input, flags=re.I).strip()
     else:
         clean_input = user_input
 
@@ -6501,13 +6651,11 @@ class JARVIS:
 
         stripped_lower = text.lower().strip()
         # Explicit slash aliases keep their old behavior.
-        if stripped_lower.startswith(("/cowork ", "/computer ")):
+        # /ai is also a cowork alias — do NOT strip the prefix here so that
+        # _aibrain_chat() can detect cowork mode and activate tool calling.
+        if stripped_lower.startswith(("/cowork ", "/computer ", "/ai ")):
             intent = "ai_chat"
             lower = text.lower()
-        elif stripped_lower.startswith("/ai "):
-            intent = "ai_chat"
-            lower = text.lower()
-            text = text[4:].strip() # Strip the /ai prefix for cleaner AI context
         else:
             self_improvement_resp = self._handle_self_improvement_command(text)
             if self_improvement_resp:
