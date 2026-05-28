@@ -104,6 +104,20 @@ Copy `jarvis_config.template.json` → rename to `jarvis_config.json` and fill i
 | NewsAPI | [newsapi.org](https://newsapi.org) |
 | Telegram Bot | Message `@BotFather` on Telegram |
 
+### Safety First
+
+JARVIS is designed to be safe to share as source code, but each user must configure their own private runtime files before using it:
+
+- Keep `jarvis_config.json` and `.env` local. They are ignored by Git because they can contain API keys, passwords, Telegram tokens, email app passwords, and personal settings.
+- Use `jarvis_config.template.json` and `.env.example` as examples only. Do not paste real secrets into template/example files.
+- Set a strong `web_api_token` or `JARVIS_WEB_TOKEN` before exposing the web/PWA bridge on your Wi-Fi or the internet. Weak defaults like `jarvis` or `1234` are rejected.
+- Telegram control is owner-only. Set `telegram_allowed_user_id` to your own Telegram user ID.
+- Non-owner secretary replies use static safe replies by default. AI auto-replies for other people are disabled unless you explicitly enable them in your private config.
+- Self-improvement requests are guarded. JARVIS can queue feature requests, but security bypasses, secret-reading, covert surveillance, and always-on camera monitoring are blocked.
+- Camera, screen, email, WhatsApp, Telegram, and system-control features should be enabled only on a computer you own and consent to operate.
+
+If you fork this project, create your own config from the templates and rotate any secret that was ever committed, pasted into chat, or shown publicly.
+
 #### Gmail App Password:
 1. myaccount.google.com → Security
 2. Enable 2-Step Verification
