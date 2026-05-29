@@ -72,6 +72,8 @@ let isWebcamActive = false;
 let selectedContextIndex = null;
 const radarBlips = [];
 let systemStatsPollTimer = null;
+let mobileCompanionPollTimer = null;
+let latestMobileMapUrl = "";
 
 // --- Initialize Elements ---
 document.addEventListener("DOMContentLoaded", () => {
@@ -919,9 +921,17 @@ function startDataPolling() {
   pollUplinkStatus();
   fetchWeatherNews();
   fetchLocation(false);
+  fetchMobileCompanionStatus();
   fetchTasks();
   
   setInterval(fetchWeatherNews, 30000);
+  if (!mobileCompanionPollTimer) {
+    mobileCompanionPollTimer = setInterval(() => {
+      if (isAuthorized && activeTab === "mission") {
+        fetchMobileCompanionStatus();
+      }
+    }, 4000);
+  }
   
   // Conditional fast poll for processes tree when analytics is active
   setInterval(() => {
@@ -1079,6 +1089,109 @@ function fetchWeatherNews() {
     }
   })
   .catch(e => console.warn("News headlines offline"));
+}
+
+function bytesLabel(value) {
+  const bytes = Number(value || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) return "--";
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${bytes} B`;
+}
+
+function shortTime(value) {
+  if (!value) return "";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return String(value);
+  return parsed.toLocaleString();
+}
+
+function updateMobileCompanionUI(data) {
+  const session = data.session || {};
+  const location = data.location || {};
+  const frame = data.frame || {};
+  const audio = data.audio || {};
+  const fileIndex = data.file_index || {};
+  const latestFile = data.latest_file || {};
+  const files = Array.isArray(data.files) ? data.files : [];
+  latestMobileMapUrl = data.map_url || "";
+
+  const statusEl = document.getElementById("mobile-session-status");
+  const lastSeenEl = document.getElementById("mobile-last-seen");
+  const frameShell = document.querySelector(".mobile-frame-shell");
+  const framePreview = document.getElementById("mobile-frame-preview");
+  const locationEl = document.getElementById("mobile-location-text");
+  const audioEl = document.getElementById("mobile-audio-text");
+  const filesEl = document.getElementById("mobile-files-text");
+  const latestFileEl = document.getElementById("mobile-latest-file-text");
+  const mapBtn = document.getElementById("mobile-open-map-btn");
+
+  const status = String(session.status || "offline").toUpperCase();
+  if (statusEl) statusEl.textContent = `Phone companion: ${status}`;
+  const lastSeen = frame.server_received_at || location.server_received_at || audio.server_received_at || session.server_received_at || "";
+  if (lastSeenEl) lastSeenEl.textContent = lastSeen ? `Last mobile update: ${shortTime(lastSeen)}` : "No mobile data received yet.";
+
+  if (framePreview && frameShell) {
+    if (data.frame_data_url) {
+      framePreview.src = data.frame_data_url;
+      frameShell.classList.add("has-frame");
+    } else {
+      framePreview.removeAttribute("src");
+      frameShell.classList.remove("has-frame");
+    }
+  }
+
+  if (locationEl) {
+    if (location.latitude !== undefined && location.longitude !== undefined) {
+      const accuracy = location.accuracy_m ? ` | ${Math.round(Number(location.accuracy_m))}m` : "";
+      locationEl.textContent = `${Number(location.latitude).toFixed(5)}, ${Number(location.longitude).toFixed(5)}${accuracy}`;
+    } else {
+      locationEl.textContent = "--";
+    }
+  }
+
+  if (audioEl) {
+    const when = audio.server_received_at ? ` | ${shortTime(audio.server_received_at)}` : "";
+    audioEl.textContent = audio.bytes ? `${bytesLabel(audio.bytes)}${when}` : "--";
+  }
+
+  if (filesEl) {
+    const count = fileIndex.file_count ?? files.length;
+    const uploaded = fileIndex.uploaded_recent_files;
+    filesEl.textContent = count || uploaded ? `${count || 0} indexed${uploaded ? ` | ${uploaded} uploaded` : ""}` : "--";
+  }
+
+  if (latestFileEl) {
+    latestFileEl.textContent = latestFile.relative_path
+      ? `${latestFile.relative_path} (${bytesLabel(latestFile.bytes)})`
+      : "--";
+  }
+
+  if (mapBtn) mapBtn.disabled = !latestMobileMapUrl;
+}
+
+function setMobileCompanionOffline(message = "Mobile companion data unavailable.") {
+  const statusEl = document.getElementById("mobile-session-status");
+  const lastSeenEl = document.getElementById("mobile-last-seen");
+  if (statusEl) statusEl.textContent = "Phone companion: OFFLINE";
+  if (lastSeenEl) lastSeenEl.textContent = message;
+}
+
+function fetchMobileCompanionStatus() {
+  if (!isAuthorized) return;
+  fetch("/api/mobile/status", { headers: authedHeaders() })
+    .then(res => {
+      if (!res.ok) throw new Error("mobile companion unavailable");
+      return res.json();
+    })
+    .then(data => {
+      if (!data.ok) throw new Error(data.error || "mobile companion error");
+      updateMobileCompanionUI(data);
+    })
+    .catch(err => {
+      console.warn("Mobile companion fetch failed:", err);
+      setMobileCompanionOffline();
+    });
 }
 
 function speakWithBrowserVoice(cleanSpeech) {
@@ -2863,8 +2976,22 @@ function setupEventListeners() {
   // MISSION CORE refreshing
   const wRef = document.getElementById("weather-refresh-btn");
   const nRef = document.getElementById("news-refresh-btn");
+  const mobileRef = document.getElementById("mobile-refresh-btn");
+  const mobileMap = document.getElementById("mobile-open-map-btn");
+  const mobileLog = document.getElementById("mobile-log-btn");
   if (wRef) wRef.addEventListener("click", () => { playSynthSound("click"); fetchWeatherNews(); });
   if (nRef) nRef.addEventListener("click", () => { playSynthSound("click"); fetchWeatherNews(); });
+  if (mobileRef) mobileRef.addEventListener("click", () => { playSynthSound("click"); fetchMobileCompanionStatus(); });
+  if (mobileMap) mobileMap.addEventListener("click", () => {
+    playSynthSound("click");
+    if (latestMobileMapUrl) window.open(latestMobileMapUrl, "_blank", "noopener");
+  });
+  if (mobileLog) mobileLog.addEventListener("click", () => {
+    playSynthSound("click");
+    const status = document.getElementById("mobile-session-status")?.textContent || "Mobile status unavailable.";
+    const lastSeen = document.getElementById("mobile-last-seen")?.textContent || "";
+    appendLog("MOBILE", `${status} ${lastSeen}`.trim(), "sys");
+  });
   
   // Snap Camera Photo
   const snapBtn = document.getElementById("radar-snap-btn");

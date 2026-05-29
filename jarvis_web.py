@@ -159,6 +159,66 @@ def _write_mobile_companion_json(name: str, payload: dict) -> None:
     (MOBILE_COMPANION_DIR / name).write_text(json.dumps(_make_json_safe(body), indent=2), encoding="utf-8")
 
 
+def _read_mobile_companion_json(name: str) -> dict | None:
+    path = MOBILE_COMPANION_DIR / name
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"error": str(exc), "path": str(path)}
+
+
+def _mobile_companion_status() -> dict:
+    import base64
+    import mimetypes
+
+    session = _read_mobile_companion_json("session.json")
+    location = _read_mobile_companion_json("latest_location.json")
+    frame = _read_mobile_companion_json("latest_frame.json")
+    audio = _read_mobile_companion_json("latest_audio.json")
+    file_index = _read_mobile_companion_json("latest_file_index.json")
+    latest_file = _read_mobile_companion_json("latest_file.json")
+
+    frame_data_url = ""
+    if frame and frame.get("path"):
+        frame_path = Path(str(frame.get("path")))
+        try:
+            if frame_path.exists() and frame_path.is_file() and frame_path.stat().st_size <= 2_500_000:
+                mime = frame.get("mime") or mimetypes.guess_type(str(frame_path))[0] or "image/jpeg"
+                frame_data_url = f"data:{mime};base64,{base64.b64encode(frame_path.read_bytes()).decode('ascii')}"
+        except Exception as exc:
+            frame = dict(frame)
+            frame["preview_error"] = str(exc)
+
+    files = []
+    if file_index and isinstance(file_index.get("files"), list):
+        files = file_index.get("files", [])[:60]
+    file_index_public = dict(file_index or {})
+    if file_index_public:
+        file_index_public["files"] = files
+        file_index_public["displayed_files"] = len(files)
+
+    map_url = ""
+    if location and location.get("latitude") is not None and location.get("longitude") is not None:
+        map_url = f"https://www.google.com/maps?q={location.get('latitude')},{location.get('longitude')}"
+
+    return {
+        "ok": True,
+        "available": MOBILE_COMPANION_DIR.exists(),
+        "runtime_dir": str(MOBILE_COMPANION_DIR),
+        "session": session,
+        "location": location,
+        "map_url": map_url,
+        "frame": frame,
+        "frame_data_url": frame_data_url,
+        "audio": audio,
+        "file_index": file_index_public or None,
+        "latest_file": latest_file,
+        "files": files,
+    }
+
+
 def _local_ips() -> list[str]:
     ips = {"127.0.0.1", "::1", "localhost"}
     try:
@@ -908,6 +968,16 @@ class JarvisWebHandler(BaseHTTPRequestHandler):
                     "static_map_available": bool(jarvis.location.get_static_map_url()),
                     "raw": jarvis.location.get(),
                 })
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        if route == "/api/mobile/status":
+            if not self._authorized():
+                self._send_json({"ok": False, "error": "Unauthorized"}, HTTPStatus.UNAUTHORIZED)
+                return
+            try:
+                self._send_json(_mobile_companion_status())
             except Exception as exc:
                 self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return

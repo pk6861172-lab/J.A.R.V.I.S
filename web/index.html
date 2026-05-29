@@ -370,6 +370,47 @@
             </div>
           </div>
 
+          <!-- Mobile Companion Widget -->
+          <div class="glass-panel mobile-companion-card">
+            <div class="panel-header">
+              <span class="panel-title">MOBILE COMPANION</span>
+              <span class="panel-subtitle">phone camera, location, mic, and file sync snapshots</span>
+              <button class="hud-btn-mini" id="mobile-refresh-btn">REFRESH</button>
+            </div>
+            <div class="mobile-companion-content">
+              <div class="mobile-frame-shell">
+                <img id="mobile-frame-preview" alt="Latest mobile camera snapshot" />
+                <div class="mobile-frame-empty" id="mobile-frame-empty">Waiting for phone frame</div>
+              </div>
+              <div class="mobile-status-row">
+                <span class="hud-status-text" id="mobile-session-status">Phone companion offline.</span>
+                <span class="hud-status-text secondary" id="mobile-last-seen">No mobile data received yet.</span>
+              </div>
+              <div class="mobile-meta-grid">
+                <div>
+                  <span>LOCATION</span>
+                  <strong id="mobile-location-text">--</strong>
+                </div>
+                <div>
+                  <span>AUDIO</span>
+                  <strong id="mobile-audio-text">--</strong>
+                </div>
+                <div>
+                  <span>FILES</span>
+                  <strong id="mobile-files-text">--</strong>
+                </div>
+                <div>
+                  <span>LATEST FILE</span>
+                  <strong id="mobile-latest-file-text">--</strong>
+                </div>
+              </div>
+              <div class="mobile-actions-row">
+                <button class="hud-btn" id="mobile-open-map-btn" disabled>OPEN MAP</button>
+                <button class="hud-btn" id="mobile-log-btn">LOG STATUS</button>
+              </div>
+            </div>
+          </div>
+
           <!-- Weather Widget -->
           <div class="glass-panel weather-card">
             <div class="panel-header">
