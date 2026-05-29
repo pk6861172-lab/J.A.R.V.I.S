@@ -6,6 +6,8 @@ It is a Python AI assistant that can chat, answer questions, open apps, check we
 
 This README is beginner-friendly. If you are very new, start with [for beginners.md](for%20beginners.md). That file explains setup like a simple school guide.
 
+For family face recognition, read [FAMILY_FACE_RECOGNITION.md](FAMILY_FACE_RECOGNITION.md). It explains how to use local photos from Google Photos safely.
+
 > Important: JARVIS is safe to share because this repository does not need to contain your private passwords or API keys. Every user must add their own private settings on their own computer.
 
 ---
@@ -381,6 +383,7 @@ You can also search for accidental secrets before pushing.
 | Telegram bot | Needs Telegram setup |
 | Web app | Available |
 | Camera and vision | Depends on setup |
+| Family face recognition | Uses local `known_faces/` folders |
 | WhatsApp bridge | Depends on setup |
 | Mobile app | Advanced setup |
 | Docker/server deployment | Advanced setup |

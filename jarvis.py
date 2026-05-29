@@ -292,6 +292,9 @@ def load_config() -> dict:
             "contacts_csv_path": "contacts.csv",
             "face_recognition_enabled": True,
             "owner_face_images": [],
+            "known_faces_dir": "known_faces",
+            "known_face_images": {},
+            "family_face_recognition_enabled": True,
             "face_match_tolerance": 0.55,
             "face_recognition_interval_frames": 10,
             "ollama_enabled": True,
@@ -401,6 +404,9 @@ def load_config() -> dict:
     cfg.setdefault("contacts_csv_path", "contacts.csv")
     cfg.setdefault("face_recognition_enabled", True)
     cfg.setdefault("owner_face_images", [])
+    cfg.setdefault("known_faces_dir", "known_faces")
+    cfg.setdefault("known_face_images", {})
+    cfg.setdefault("family_face_recognition_enabled", True)
     cfg.setdefault("face_match_tolerance", 0.55)
     cfg.setdefault("face_recognition_interval_frames", 10)
     cfg.setdefault("ollama_enabled", True)
@@ -4483,6 +4489,194 @@ class OwnerFaceRecognizer:
             return "NO_FACE", None, f"Owner face verification failed: {e}"
 
 
+class FamilyFaceRecognizer:
+    """Identifies consented family profiles from local reference folders only."""
+
+    IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
+
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.enabled = bool(cfg.get("family_face_recognition_enabled", True)) and bool(cfg.get("face_recognition_enabled", True))
+        try:
+            self.tolerance = float(cfg.get("face_match_tolerance", 0.55) or 0.55)
+        except Exception:
+            self.tolerance = 0.55
+        self.tolerance = max(0.35, min(0.75, self.tolerance))
+        self._profiles: list[dict] = []
+        self._load_error: str | None = None
+        self._loaded = False
+
+    def _resolve_path(self, value: str) -> Path:
+        p = Path(str(value).strip())
+        if not p.is_absolute():
+            p = (BASE_DIR / p).resolve()
+        return p
+
+    def _collect_profiles(self) -> dict[str, list[Path]]:
+        people: dict[str, list[Path]] = {}
+
+        root_value = str(self.cfg.get("known_faces_dir") or "known_faces").strip()
+        root = self._resolve_path(root_value)
+        if root.is_dir():
+            for person_dir in sorted(root.iterdir()):
+                if not person_dir.is_dir():
+                    continue
+                name = person_dir.name.strip()
+                if not name:
+                    continue
+                for p in sorted(person_dir.iterdir()):
+                    if p.is_file() and p.suffix.lower() in self.IMAGE_SUFFIXES:
+                        people.setdefault(name, []).append(p.resolve())
+
+        explicit = self.cfg.get("known_face_images") or {}
+        if isinstance(explicit, dict):
+            for raw_name, raw_paths in explicit.items():
+                name = str(raw_name).strip()
+                if not name:
+                    continue
+                if isinstance(raw_paths, str):
+                    raw_paths = [raw_paths]
+                if not isinstance(raw_paths, list):
+                    continue
+                for item in raw_paths:
+                    p = self._resolve_path(str(item))
+                    if p.is_file() and p.suffix.lower() in self.IMAGE_SUFFIXES:
+                        people.setdefault(name, []).append(p)
+
+        owner_name = str(self.cfg.get("user_name") or "Owner").strip() or "Owner"
+        owner_paths = OwnerFaceRecognizer(self.cfg)._collect_image_paths()
+        for p in owner_paths:
+            people.setdefault(owner_name, []).append(p)
+
+        deduped: dict[str, list[Path]] = {}
+        for name, paths in people.items():
+            seen: set[str] = set()
+            for p in paths:
+                key = str(p)
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.setdefault(name, []).append(p)
+        return deduped
+
+    def _ensure_loaded(self) -> None:
+        if self._loaded:
+            return
+        self.reload()
+
+    def reload(self) -> None:
+        self._profiles = []
+        self._load_error = None
+        self._loaded = True
+        if not self.enabled:
+            self._load_error = "Family face recognition disabled."
+            return
+        fr = ensure_face_recognition()
+        if not fr:
+            self._load_error = "face_recognition not installed. pip install face_recognition"
+            return
+
+        people = self._collect_profiles()
+        if not people:
+            self._load_error = "No known face profiles. Add photos under known_faces/Person Name/."
+            return
+
+        for name, paths in people.items():
+            loaded_for_person = 0
+            for p in paths:
+                try:
+                    img = fr.load_image_file(str(p))
+                    encs = fr.face_encodings(img, num_jitters=1)
+                    if encs:
+                        self._profiles.append({"name": name, "encoding": encs[0], "path": str(p)})
+                        loaded_for_person += 1
+                except Exception as e:
+                    print(f"[FamilyFaceRec] skip {p.name}: {e}")
+            if paths and not loaded_for_person:
+                print(f"[FamilyFaceRec] no usable face found for {name}. Use clear front-facing photos.")
+
+        if not self._profiles:
+            self._load_error = "Could not extract faces from known family photos."
+
+    def status(self) -> str:
+        self._ensure_loaded()
+        if not self.enabled:
+            return self._load_error or "Family face recognition disabled."
+        if self._load_error and not self._profiles:
+            return self._load_error
+        names = sorted({p["name"] for p in self._profiles})
+        return f"Family face profiles: {len(self._profiles)} photo encoding(s), {len(names)} people ({', '.join(names)})."
+
+    def identify_bgr(self, bgr, max_faces: int = 5) -> list[dict]:
+        """Return recognized/unknown faces for a BGR OpenCV image."""
+        if not self.enabled:
+            return []
+        fr = ensure_face_recognition()
+        if not fr:
+            self._load_error = "face_recognition not installed. pip install face_recognition"
+            return []
+        self._ensure_loaded()
+        if not self._profiles or bgr is None:
+            return []
+
+        if cv2 is not None:
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        else:
+            rgb = bgr[:, :, ::-1].copy()
+
+        try:
+            import numpy as np
+
+            locs = fr.face_locations(rgb, model="hog")
+            if not locs:
+                return []
+            encs = fr.face_encodings(rgb, known_face_locations=locs, num_jitters=0)
+            known_encs = [p["encoding"] for p in self._profiles]
+            results: list[dict] = []
+            for loc, enc in list(zip(locs, encs))[:max_faces]:
+                top, right, bottom, left = loc
+                dists = fr.face_distance(known_encs, enc)
+                best_idx = int(np.argmin(dists)) if len(dists) else -1
+                best = float(dists[best_idx]) if best_idx >= 0 else 1.0
+                recognized = best <= self.tolerance
+                name = str(self._profiles[best_idx]["name"]) if recognized and best_idx >= 0 else "UNKNOWN"
+                results.append(
+                    {
+                        "x": int(left),
+                        "y": int(top),
+                        "w": int(max(0, right - left)),
+                        "h": int(max(0, bottom - top)),
+                        "name": name,
+                        "recognized": bool(recognized),
+                        "distance_score": round(best, 4),
+                    }
+                )
+            return results
+        except Exception as e:
+            print(f"[FamilyFaceRec] identify failed: {e}")
+            return []
+
+    def verify_image_file(self, image_path: str) -> tuple[str, str | None, float | None, str]:
+        try:
+            fr = ensure_face_recognition()
+            if not fr:
+                return "NO_PROFILE", None, None, "face_recognition not installed. pip install face_recognition"
+            img = fr.load_image_file(str(image_path))
+            if cv2 is not None:
+                bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            else:
+                bgr = img[:, :, ::-1].copy()
+            faces = self.identify_bgr(bgr, max_faces=1)
+            if not faces:
+                return "NO_FACE", None, None, "No known family face detected in this image."
+            face = faces[0]
+            if face.get("recognized"):
+                return "KNOWN", str(face.get("name")), float(face.get("distance_score")), "Matched a local family face profile."
+            return "UNKNOWN", None, float(face.get("distance_score")), "Face detected, but it did not match a local family profile."
+        except Exception as e:
+            return "NO_FACE", None, None, f"Family face verification failed: {e}"
+
+
 # ═══════════════════════════════════════════════════════════════
 #  WEATHER MODULE
 # ═══════════════════════════════════════════════════════════════
@@ -5801,6 +5995,7 @@ class JARVIS:
         self.telegram = None  # Initialize placeholder
         self.contacts = ContactsModule(self.cfg)
         self.owner_face = OwnerFaceRecognizer(self.cfg)
+        self.family_faces = FamilyFaceRecognizer(self.cfg)
         self.weather  = WeatherModule(self.cfg)
         self.news     = NewsModule(self.cfg)
         self.location = LocationModule(self.cfg)

@@ -1257,51 +1257,22 @@ class JarvisWebHandler(BaseHTTPRequestHandler):
                     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
                     
                     if img is not None:
-                        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                        if face_cascade is not None:
-                            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 30))
-                            for idx, (x, y, w, h) in enumerate(faces[:3]):
-                                # Run simple recognition on each face region
-                                roi = gray[y:y+h, x:x+w]
-                                roi = cv2.resize(roi, (100, 100))
-                                
-                                recognized = False
-                                name = "UNKNOWN"
-                                
-                                # Load owner templates
-                                templates = []
-                                owner_dir = BASE_DIR / 'owner_faces'
-                                if owner_dir.exists():
-                                    for p in owner_dir.iterdir():
-                                        if p.suffix.lower() in ('.jpg', '.jpeg', '.png'):
-                                            try:
-                                                timg = cv2.imread(str(p))
-                                                tgray = cv2.cvtColor(timg, cv2.COLOR_BGR2GRAY)
-                                                if face_cascade is not None:
-                                                    tf = face_cascade.detectMultiScale(tgray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 30))
-                                                    if len(tf) > 0:
-                                                        x2, y2, w2, h2 = tf[0]
-                                                        troi = tgray[y2:y2+h2, x2:x2+w2]
-                                                    else:
-                                                        troi = cv2.resize(tgray, (100, 100))
-                                                else:
-                                                    troi = cv2.resize(tgray, (100, 100))
-                                                troi = cv2.resize(troi, (100, 100))
-                                                templates.append(troi)
-                                            except Exception:
-                                                continue
-                                
-                                # Compare with simple MSE threshold
-                                for t in templates:
-                                    try:
-                                        mse = float(np.mean((t.astype('float32') - roi.astype('float32')) ** 2))
-                                        if mse < 2000.0:
-                                            recognized = True
-                                            name = "PRASHANT"  # owner name
-                                            break
-                                    except Exception:
-                                        continue
-                                
+                        family_faces = []
+                        if face_tracking:
+                            try:
+                                jarvis = _get_jarvis()
+                                recognizer = getattr(jarvis, "family_faces", None)
+                                if recognizer:
+                                    family_faces = recognizer.identify_bgr(img, max_faces=5)
+                            except Exception as exc:
+                                print(f"[WebFaceRec] family recognition unavailable: {exc}")
+
+                        if family_faces:
+                            for face in family_faces:
+                                x = int(face.get("x", 0))
+                                y = int(face.get("y", 0))
+                                w = int(face.get("w", 0))
+                                h = int(face.get("h", 0))
                                 # Estimate distance and threat level
                                 img_h, img_w = img.shape[:2]
                                 rel = max(1.0, (w * h) / float(img_w * img_h))
@@ -1313,11 +1284,32 @@ class JarvisWebHandler(BaseHTTPRequestHandler):
                                     "y": int(y),
                                     "w": int(w),
                                     "h": int(h),
-                                    "name": name,
-                                    "recognized": recognized,
+                                    "name": str(face.get("name") or "UNKNOWN"),
+                                    "recognized": bool(face.get("recognized")),
                                     "threat": threat,
-                                    "distance": round(distance_m, 2)
+                                    "distance": round(distance_m, 2),
+                                    "match_score": face.get("distance_score")
                                 })
+                        else:
+                            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                            if face_cascade is not None:
+                                faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 30))
+                                for idx, (x, y, w, h) in enumerate(faces[:3]):
+                                    img_h, img_w = img.shape[:2]
+                                    rel = max(1.0, (w * h) / float(img_w * img_h))
+                                    distance_m = max(0.4, min(6.0, 1.6 / (rel ** 0.5)))
+                                    threat = "LOW" if distance_m > 2.5 else "MED" if distance_m > 1.4 else "HIGH"
+
+                                    faces_data.append({
+                                        "x": int(x),
+                                        "y": int(y),
+                                        "w": int(w),
+                                        "h": int(h),
+                                        "name": "UNKNOWN",
+                                        "recognized": False,
+                                        "threat": threat,
+                                        "distance": round(distance_m, 2)
+                                    })
                 
                 self._send_json({
                     "ok": True, 

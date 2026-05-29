@@ -12,6 +12,7 @@ jarvis_events.json
 jarvis_mobile_settings.json
 PyWhatKit_DB.txt
 owner_faces/
+known_faces/
 jarvis_photos/
 jarvisphotos/
 uploads/

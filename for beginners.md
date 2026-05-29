@@ -6,6 +6,8 @@ JARVIS is a personal AI assistant. It can chat with you, help with your computer
 
 You do not need to understand everything on the first day. Start with the simple setup, make JARVIS run in text mode, and then add more features one by one.
 
+If you want JARVIS to recognize family members, read [FAMILY_FACE_RECOGNITION.md](FAMILY_FACE_RECOGNITION.md) after basic setup works.
+
 ---
 
 ## Step 1: Download JARVIS
