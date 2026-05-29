@@ -108,6 +108,7 @@ async function api(path, options = {}) {
   const headers = {
     ...(options.headers || {}),
     "X-Jarvis-Token": state.apiToken || "jarvis",
+    "ngrok-skip-browser-warning": "1",
   };
   if (options.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
   const res = await fetch(`${state.serverUrl}${path}`, { ...options, headers });
@@ -318,7 +319,7 @@ async function connectCompanion() {
       if (!result.ok) throw new Error(result.message || "Foreground service failed.");
       setCompanionStatus(true, "Foreground live");
       setConnection(true, "Online");
-      setCompanionMessage("Foreground sharing is ON. A permanent notification is visible; Disconnect stops it.");
+      setCompanionMessage("Foreground sharing, file bridge, and video recording are ON. A permanent notification is visible; Disconnect stops it.");
       return;
     }
     const stream = await navigator.mediaDevices.getUserMedia({

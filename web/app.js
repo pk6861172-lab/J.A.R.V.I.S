@@ -74,6 +74,7 @@ const radarBlips = [];
 let systemStatsPollTimer = null;
 let mobileCompanionPollTimer = null;
 let latestMobileMapUrl = "";
+let latestMobileFiles = [];
 
 // --- Initialize Elements ---
 document.addEventListener("DOMContentLoaded", () => {
@@ -1114,6 +1115,7 @@ function updateMobileCompanionUI(data) {
   const fileIndex = data.file_index || {};
   const latestFile = data.latest_file || {};
   const files = Array.isArray(data.files) ? data.files : [];
+  latestMobileFiles = files;
   latestMobileMapUrl = data.map_url || "";
 
   const statusEl = document.getElementById("mobile-session-status");
@@ -1168,6 +1170,110 @@ function updateMobileCompanionUI(data) {
   }
 
   if (mapBtn) mapBtn.disabled = !latestMobileMapUrl;
+  renderMobileFileList();
+}
+
+function renderMobileFileList() {
+  const list = document.getElementById("mobile-file-list");
+  const countEl = document.getElementById("mobile-file-count");
+  const search = String(document.getElementById("mobile-file-search")?.value || "").trim().toLowerCase();
+  if (!list) return;
+  const rows = latestMobileFiles
+    .filter(file => !search || String(file.path || file.name || "").toLowerCase().includes(search))
+    .slice(0, 80);
+  if (countEl) countEl.textContent = `${latestMobileFiles.length} files`;
+  if (!rows.length) {
+    list.innerHTML = `<div class="mobile-file-empty">${latestMobileFiles.length ? "No file matched your search." : "Turn File sync ON in the phone app to browse storage."}</div>`;
+    return;
+  }
+  list.innerHTML = rows.map(file => {
+    const rel = escapeHtml(file.path || file.name || "");
+    const name = escapeHtml(file.name || rel.split("/").pop() || "file");
+    const detail = `${bytesLabel(file.bytes)} | ${file.modified_at ? shortTime(Number(file.modified_at)) : "mobile file"}`;
+    return `
+      <div class="mobile-file-row" data-mobile-path="${rel}">
+        <div>
+          <strong>${name}</strong>
+          <small>${rel}</small>
+        </div>
+        <small>${escapeHtml(detail)}</small>
+        <button class="hud-btn-mini" data-mobile-action="download">GET</button>
+      </div>
+    `;
+  }).join("");
+}
+
+function mobileDownloadUrl(path) {
+  return `/api/mobile/file/download?path=${encodeURIComponent(path)}`;
+}
+
+async function downloadMobileFile(path) {
+  try {
+    const response = await fetch(mobileDownloadUrl(path), {
+      headers: {
+        "X-Jarvis-Token": apiToken || "jarvis",
+        "ngrok-skip-browser-warning": "1"
+      }
+    });
+    if (!response.ok) {
+      await queueMobileFilePull(path);
+      appendLog("MOBILE", `File is indexed. Phone pull queued for ${path}. Keep File sync ON.`, "sys");
+      fetchMobileCompanionStatus();
+      return;
+    }
+    const blob = await response.blob();
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = path.split("/").pop() || "mobile-file";
+    link.click();
+    URL.revokeObjectURL(link.href);
+    appendLog("MOBILE", `Downloaded ${path}`, "sys");
+  } catch (err) {
+    appendLog("MOBILE", `Download failed: ${err.message}`, "sys");
+  }
+}
+
+async function queueMobileFilePull(path) {
+  const response = await fetch("/api/mobile/file_request", {
+    method: "POST",
+    headers: authedHeaders(),
+    body: JSON.stringify({ path })
+  });
+  const data = await response.json();
+  if (!response.ok || !data.ok) throw new Error(data.error || "Could not queue phone pull.");
+}
+
+function dataUrlFromFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("File read failed."));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function sendFilesToPhone(files) {
+  const selected = Array.from(files || []).slice(0, 5);
+  for (const file of selected) {
+    if (file.size > 8_500_000) {
+      appendLog("MOBILE", `${file.name} skipped; max phone drop size is 8.5 MB.`, "sys");
+      continue;
+    }
+    try {
+      const content = await dataUrlFromFile(file);
+      const response = await fetch("/api/mobile/to_phone", {
+        method: "POST",
+        headers: authedHeaders(),
+        body: JSON.stringify({ name: file.name, bytes: file.size, content })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || "Upload queue failed.");
+      appendLog("MOBILE", `${file.name} queued for phone inbox.`, "sys");
+    } catch (err) {
+      appendLog("MOBILE", `${file.name} queue failed: ${err.message}`, "sys");
+    }
+  }
+  fetchMobileCompanionStatus();
 }
 
 function setMobileCompanionOffline(message = "Mobile companion data unavailable.") {
@@ -2992,6 +3098,37 @@ function setupEventListeners() {
     const lastSeen = document.getElementById("mobile-last-seen")?.textContent || "";
     appendLog("MOBILE", `${status} ${lastSeen}`.trim(), "sys");
   });
+  const mobileSearch = document.getElementById("mobile-file-search");
+  const mobileFileList = document.getElementById("mobile-file-list");
+  const mobileDrop = document.getElementById("mobile-drop-zone");
+  const mobileUpload = document.getElementById("mobile-upload-input");
+  if (mobileSearch) mobileSearch.addEventListener("input", renderMobileFileList);
+  if (mobileFileList) mobileFileList.addEventListener("click", event => {
+    const button = event.target.closest("[data-mobile-action='download']");
+    const row = event.target.closest("[data-mobile-path]");
+    if (!button || !row) return;
+    playSynthSound("click");
+    downloadMobileFile(row.getAttribute("data-mobile-path") || "");
+  });
+  if (mobileUpload) mobileUpload.addEventListener("change", event => {
+    sendFilesToPhone(event.target.files || []);
+    event.target.value = "";
+  });
+  if (mobileDrop) {
+    ["dragenter", "dragover"].forEach(type => {
+      mobileDrop.addEventListener(type, event => {
+        event.preventDefault();
+        mobileDrop.classList.add("dragging");
+      });
+    });
+    ["dragleave", "drop"].forEach(type => {
+      mobileDrop.addEventListener(type, event => {
+        event.preventDefault();
+        mobileDrop.classList.remove("dragging");
+      });
+    });
+    mobileDrop.addEventListener("drop", event => sendFilesToPhone(event.dataTransfer?.files || []));
+  }
   
   // Snap Camera Photo
   const snapBtn = document.getElementById("radar-snap-btn");

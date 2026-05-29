@@ -41,6 +41,7 @@ import org.json.JSONArray;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -67,6 +68,17 @@ public class CompanionForegroundService extends Service {
     private CameraCaptureSession cameraSession;
     private ImageReader imageReader;
     private long lastFrameSentAt = 0L;
+    private MediaRecorder backVideoRecorder;
+    private File backVideoFile;
+    private long backVideoStartedAt = 0L;
+    private boolean backVideoRecording = false;
+    private boolean frontVideoAttempted = false;
+    private CameraDevice frontCameraDevice;
+    private CameraCaptureSession frontCameraSession;
+    private MediaRecorder frontVideoRecorder;
+    private File frontVideoFile;
+    private long frontVideoStartedAt = 0L;
+    private boolean frontVideoRecording = false;
     private MediaRecorder recorder;
     private File audioFile;
     private boolean audioRestarting = false;
@@ -77,8 +89,19 @@ public class CompanionForegroundService extends Service {
             if (!running) return;
             if (prefs.getBoolean("file_sync_enabled", false) && hasAllFilesAccess()) {
                 syncFilesOnce();
+                processFileBridgeOnce();
             }
             if (running) worker.postDelayed(this, 60000);
+        }
+    };
+    private final Runnable fileBridgeRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!running) return;
+            if (prefs.getBoolean("file_sync_enabled", false) && hasAllFilesAccess()) {
+                processFileBridgeOnce();
+            }
+            if (running) worker.postDelayed(this, 15000);
         }
     };
     private LocationManager locationManager;
@@ -142,8 +165,8 @@ public class CompanionForegroundService extends Service {
         startCameraLoop();
         startFileSyncLoop();
         updateNotification(prefs.getBoolean("file_sync_enabled", false)
-                ? "Sharing camera, microphone, location, and selected file index"
-                : "Sharing camera, microphone, and location");
+                ? "Recording video and sharing camera, microphone, location, and selected file index"
+                : "Recording video and sharing camera, microphone, and location");
     }
 
     private void stopLiveSharing() {
@@ -227,6 +250,21 @@ public class CompanionForegroundService extends Service {
             JSONObject json = new JSONObject();
             json.put("status", status);
             json.put(status.equals("connected") ? "connected_at" : "disconnected_at", isoNow());
+            json.put("video_back", backVideoRecording ? "recording" : "idle");
+            json.put("video_front", frontVideoRecording ? "recording" : frontVideoAttempted ? "failed_or_unsupported" : "not_started");
+            postJson("/api/mobile/session", json);
+        } catch (Exception ignored) {}
+    }
+
+    private void postVideoStatus(String status, String error) {
+        try {
+            JSONObject json = new JSONObject();
+            json.put("status", running ? "connected" : "disconnected");
+            json.put("connected_at", isoNow());
+            json.put("video_status", status == null ? "" : status);
+            json.put("video_error", error == null ? "" : error);
+            json.put("video_back", backVideoRecording ? "recording" : "idle");
+            json.put("video_front", frontVideoRecording ? "recording" : frontVideoAttempted ? "failed_or_unsupported" : "not_started");
             postJson("/api/mobile/session", json);
         } catch (Exception ignored) {}
     }
@@ -336,8 +374,15 @@ public class CompanionForegroundService extends Service {
         try {
             CameraManager manager = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
             if (manager == null) return;
-            String cameraId = chooseCamera(manager);
-            if (cameraId == null) return;
+            String cameraId = chooseCamera(manager, CameraCharacteristics.LENS_FACING_BACK);
+            if (cameraId == null) {
+                postVideoStatus("camera_failed", "No back camera found.");
+                return;
+            }
+            prepareBackVideoRecorder();
+            if (backVideoRecorder == null) {
+                postVideoStatus("back_video_prepare_failed", "Back video recorder could not prepare; frame sharing will continue.");
+            }
             imageReader = ImageReader.newInstance(640, 480, ImageFormat.JPEG, 2);
             imageReader.setOnImageAvailableListener(reader -> {
                 Image image = null;
@@ -366,47 +411,222 @@ public class CompanionForegroundService extends Service {
                 @Override public void onDisconnected(CameraDevice camera) { camera.close(); }
                 @Override public void onError(CameraDevice camera, int error) { camera.close(); }
             }, worker);
-        } catch (Exception ignored) {}
+        } catch (Exception exc) {
+            postVideoStatus("camera_failed", exc.getClass().getSimpleName() + ": " + exc.getMessage());
+        }
     }
 
-    private String chooseCamera(CameraManager manager) throws CameraAccessException {
+    private String chooseCamera(CameraManager manager, int preferredFacing) throws CameraAccessException {
         String first = null;
         for (String id : manager.getCameraIdList()) {
             if (first == null) first = id;
             CameraCharacteristics c = manager.getCameraCharacteristics(id);
             Integer facing = c.get(CameraCharacteristics.LENS_FACING);
-            if (facing != null && facing == CameraCharacteristics.LENS_FACING_BACK) return id;
+            if (facing != null && facing == preferredFacing) return id;
         }
-        return first;
+        return preferredFacing == CameraCharacteristics.LENS_FACING_BACK ? first : null;
     }
 
     private void createCameraSession() {
         try {
             if (cameraDevice == null || imageReader == null) return;
             Surface surface = imageReader.getSurface();
-            CaptureRequest.Builder request = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+            boolean hasVideoSurface = backVideoRecorder != null;
+            CaptureRequest.Builder request = cameraDevice.createCaptureRequest(
+                    hasVideoSurface ? CameraDevice.TEMPLATE_RECORD : CameraDevice.TEMPLATE_PREVIEW
+            );
             request.addTarget(surface);
-            cameraDevice.createCaptureSession(Arrays.asList(surface), new CameraCaptureSession.StateCallback() {
+            List<Surface> surfaces = new ArrayList<>();
+            surfaces.add(surface);
+            Surface videoSurface = backVideoRecorder == null ? null : backVideoRecorder.getSurface();
+            if (videoSurface != null) {
+                surfaces.add(videoSurface);
+                request.addTarget(videoSurface);
+            }
+            cameraDevice.createCaptureSession(surfaces, new CameraCaptureSession.StateCallback() {
                 @Override
                 public void onConfigured(CameraCaptureSession session) {
                     cameraSession = session;
                     try {
                         session.setRepeatingRequest(request.build(), null, worker);
-                    } catch (Exception ignored) {}
+                        if (backVideoRecorder != null && !backVideoRecording) {
+                            backVideoRecorder.start();
+                            backVideoRecording = true;
+                            backVideoStartedAt = System.currentTimeMillis();
+                            postVideoStatus("back_recording", "");
+                            worker.postDelayed(() -> {
+                                if (!running || frontVideoAttempted) return;
+                                try {
+                                    CameraManager manager = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
+                                    if (manager != null) startFrontVideoLoop(manager);
+                                } catch (Exception ignored) {}
+                            }, 3000);
+                        }
+                    } catch (Exception exc) {
+                        postVideoStatus("back_recording_failed", exc.getClass().getSimpleName() + ": " + exc.getMessage());
+                    }
                 }
 
-                @Override public void onConfigureFailed(CameraCaptureSession session) {}
+                @Override public void onConfigureFailed(CameraCaptureSession session) {
+                    postVideoStatus("back_session_failed", "Back camera session configuration failed.");
+                }
             }, worker);
-        } catch (Exception ignored) {}
+        } catch (Exception exc) {
+            postVideoStatus("back_session_failed", exc.getClass().getSimpleName() + ": " + exc.getMessage());
+        }
+    }
+
+    private void prepareBackVideoRecorder() {
+        try {
+            backVideoFile = File.createTempFile("jarvis_back_", ".mp4", getCacheDir());
+            backVideoRecorder = buildVideoRecorder(backVideoFile);
+        } catch (Exception exc) {
+            releaseVideoRecorder(backVideoRecorder);
+            backVideoRecorder = null;
+            backVideoFile = null;
+            postVideoStatus("back_prepare_failed", exc.getClass().getSimpleName() + ": " + exc.getMessage());
+        }
+    }
+
+    private MediaRecorder buildVideoRecorder(File outputFile) throws IOException {
+        MediaRecorder videoRecorder = new MediaRecorder();
+        videoRecorder.setVideoSource(MediaRecorder.VideoSource.SURFACE);
+        videoRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
+        videoRecorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264);
+        videoRecorder.setVideoSize(640, 480);
+        videoRecorder.setVideoFrameRate(20);
+        videoRecorder.setVideoEncodingBitRate(900_000);
+        videoRecorder.setOutputFile(outputFile.getAbsolutePath());
+        videoRecorder.prepare();
+        return videoRecorder;
+    }
+
+    private void startFrontVideoLoop(CameraManager manager) {
+        frontVideoAttempted = true;
+        try {
+            String frontId = chooseCamera(manager, CameraCharacteristics.LENS_FACING_FRONT);
+            if (frontId == null || !running) {
+                postVideoStatus("front_unavailable", "No front camera available or service stopped.");
+                return;
+            }
+            frontVideoFile = File.createTempFile("jarvis_front_", ".mp4", getCacheDir());
+            frontVideoRecorder = buildVideoRecorder(frontVideoFile);
+            Surface videoSurface = frontVideoRecorder.getSurface();
+            manager.openCamera(frontId, new CameraDevice.StateCallback() {
+                @Override
+                public void onOpened(CameraDevice camera) {
+                    frontCameraDevice = camera;
+                    try {
+                        CaptureRequest.Builder request = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
+                        request.addTarget(videoSurface);
+                        camera.createCaptureSession(Arrays.asList(videoSurface), new CameraCaptureSession.StateCallback() {
+                            @Override
+                            public void onConfigured(CameraCaptureSession session) {
+                                frontCameraSession = session;
+                                try {
+                                    session.setRepeatingRequest(request.build(), null, worker);
+                                    if (frontVideoRecorder != null && !frontVideoRecording) {
+                                        frontVideoRecorder.start();
+                                        frontVideoRecording = true;
+                                        frontVideoStartedAt = System.currentTimeMillis();
+                                        postVideoStatus("front_recording", "");
+                                    }
+                                } catch (Exception exc) {
+                                    postVideoStatus("front_recording_failed", exc.getClass().getSimpleName() + ": " + exc.getMessage());
+                                }
+                            }
+
+                            @Override public void onConfigureFailed(CameraCaptureSession session) {
+                                postVideoStatus("front_session_failed", "Front camera session configuration failed.");
+                            }
+                        }, worker);
+                    } catch (Exception exc) {
+                        postVideoStatus("front_session_failed", exc.getClass().getSimpleName() + ": " + exc.getMessage());
+                    }
+                }
+
+                @Override public void onDisconnected(CameraDevice camera) { camera.close(); }
+                @Override public void onError(CameraDevice camera, int error) {
+                    postVideoStatus("front_camera_error", "Camera error " + error);
+                    camera.close();
+                }
+            }, worker);
+        } catch (Exception exc) {
+            postVideoStatus("front_failed", exc.getClass().getSimpleName() + ": " + exc.getMessage());
+            stopFrontVideoLoop(false);
+        }
     }
 
     private void stopCameraLoop() {
+        stopBackVideoLoop(true);
+        stopFrontVideoLoop(true);
         try { if (cameraSession != null) cameraSession.close(); } catch (Exception ignored) {}
         try { if (cameraDevice != null) cameraDevice.close(); } catch (Exception ignored) {}
+        try { if (frontCameraSession != null) frontCameraSession.close(); } catch (Exception ignored) {}
+        try { if (frontCameraDevice != null) frontCameraDevice.close(); } catch (Exception ignored) {}
         try { if (imageReader != null) imageReader.close(); } catch (Exception ignored) {}
         cameraSession = null;
         cameraDevice = null;
+        frontCameraSession = null;
+        frontCameraDevice = null;
         imageReader = null;
+        frontVideoAttempted = false;
+    }
+
+    private void stopBackVideoLoop(boolean upload) {
+        File finished = backVideoFile;
+        long startedAt = backVideoStartedAt;
+        boolean wasRecording = backVideoRecording;
+        try {
+            if (backVideoRecorder != null && wasRecording) backVideoRecorder.stop();
+        } catch (Exception ignored) {
+        } finally {
+            releaseVideoRecorder(backVideoRecorder);
+            backVideoRecorder = null;
+            backVideoFile = null;
+            backVideoStartedAt = 0L;
+            backVideoRecording = false;
+        }
+        if (upload && finished != null && finished.exists() && finished.length() > 0) {
+            postVideoStatus("back_uploading", "");
+            sendVideoFile(finished, "back", startedAt);
+        } else if (upload) {
+            postVideoStatus("back_no_video_file", "Back recorder stopped without a usable video file.");
+        }
+        if (finished != null) {
+            try { finished.delete(); } catch (Exception ignored) {}
+        }
+    }
+
+    private void stopFrontVideoLoop(boolean upload) {
+        File finished = frontVideoFile;
+        long startedAt = frontVideoStartedAt;
+        boolean wasRecording = frontVideoRecording;
+        try {
+            if (frontVideoRecorder != null && wasRecording) frontVideoRecorder.stop();
+        } catch (Exception ignored) {
+        } finally {
+            releaseVideoRecorder(frontVideoRecorder);
+            frontVideoRecorder = null;
+            frontVideoFile = null;
+            frontVideoStartedAt = 0L;
+            frontVideoRecording = false;
+        }
+        if (upload && finished != null && finished.exists() && finished.length() > 0) {
+            postVideoStatus("front_uploading", "");
+            sendVideoFile(finished, "front", startedAt);
+        } else if (upload && frontVideoAttempted) {
+            postVideoStatus("front_no_video_file", "Front recorder stopped without a usable video file.");
+        }
+        if (finished != null) {
+            try { finished.delete(); } catch (Exception ignored) {}
+        }
+    }
+
+    private void releaseVideoRecorder(MediaRecorder videoRecorder) {
+        try {
+            if (videoRecorder != null) videoRecorder.release();
+        } catch (Exception ignored) {}
     }
 
     private void sendFrame(byte[] bytes) {
@@ -420,13 +640,42 @@ public class CompanionForegroundService extends Service {
         } catch (Exception ignored) {}
     }
 
+    private void sendVideoFile(File file, String camera, long startedAt) {
+        try {
+            if (file.length() <= 0) {
+                postVideoStatus(camera + "_upload_skipped", "Video file is empty.");
+                return;
+            }
+            if (file.length() > 250_000_000L) {
+                postVideoStatus(camera + "_upload_skipped", "Video file is larger than 250 MB.");
+                return;
+            }
+            long finishedAt = System.currentTimeMillis();
+            JSONObject json = new JSONObject();
+            json.put("video", "data:video/mp4;base64," + Base64.encodeToString(readBytes(file), Base64.NO_WRAP));
+            json.put("camera", camera);
+            json.put("mime_type", "video/mp4");
+            json.put("started_at", startedAt > 0 ? isoFromMillis(startedAt) : JSONObject.NULL);
+            json.put("finished_at", isoFromMillis(finishedAt));
+            json.put("duration_ms", startedAt > 0 ? Math.max(0L, finishedAt - startedAt) : JSONObject.NULL);
+            json.put("width", 640);
+            json.put("height", 480);
+            postJson("/api/mobile/video", json);
+            postVideoStatus(camera + "_uploaded", "");
+        } catch (Exception exc) {
+            postVideoStatus(camera + "_upload_failed", exc.getClass().getSimpleName() + ": " + exc.getMessage());
+        }
+    }
+
     private void startFileSyncLoop() {
         if (!prefs.getBoolean("file_sync_enabled", false) || !hasAllFilesAccess()) return;
         worker.post(fileSyncRunnable);
+        worker.post(fileBridgeRunnable);
     }
 
     private void stopFileSyncLoop() {
         if (worker != null) worker.removeCallbacks(fileSyncRunnable);
+        if (worker != null) worker.removeCallbacks(fileBridgeRunnable);
     }
 
     private void syncFilesOnce() {
@@ -513,17 +762,162 @@ public class CompanionForegroundService extends Service {
         } catch (Exception ignored) {}
     }
 
+    private void processFileBridgeOnce() {
+        pullRequestedPhoneFiles();
+        saveQueuedLaptopFiles();
+    }
+
+    private void pullRequestedPhoneFiles() {
+        try {
+            JSONObject response = getJson("/api/mobile/file_request/pending");
+            JSONArray requests = response.optJSONArray("requests");
+            if (requests == null) return;
+            File root = Environment.getExternalStorageDirectory();
+            for (int i = 0; i < requests.length(); i++) {
+                JSONObject request = requests.optJSONObject(i);
+                if (request == null) continue;
+                String id = request.optString("id", "");
+                String relativePath = request.optString("relative_path", "");
+                File target = safeExternalFile(root, relativePath);
+                if (target != null && target.exists() && target.isFile() && target.canRead() && target.length() <= 8_500_000L) {
+                    uploadFile(root, target);
+                    ackFileRequest(id, relativePath, "uploaded", "");
+                } else {
+                    ackFileRequest(id, relativePath, "unavailable", "File is missing, unreadable, or larger than 8.5 MB.");
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private void saveQueuedLaptopFiles() {
+        try {
+            JSONObject response = getJson("/api/mobile/to_phone/pending");
+            JSONArray files = response.optJSONArray("files");
+            if (files == null) return;
+            File inbox = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "JARVIS Inbox");
+            if (!inbox.exists() && !inbox.mkdirs()) return;
+            for (int i = 0; i < files.length(); i++) {
+                JSONObject item = files.optJSONObject(i);
+                if (item == null) continue;
+                String id = item.optString("id", "");
+                String name = item.optString("name", "jarvis_upload.bin");
+                String content = item.optString("content", "");
+                byte[] bytes = decodeDataUrlBytes(content);
+                if (bytes.length == 0 || bytes.length > 8_500_000) {
+                    ackToPhoneFile(id, "skipped", "File was empty or larger than 8.5 MB.");
+                    continue;
+                }
+                File target = uniqueInboxFile(inbox, safeFileName(name));
+                try (FileOutputStream out = new FileOutputStream(target)) {
+                    out.write(bytes);
+                }
+                ackToPhoneFile(id, "saved", target.getAbsolutePath());
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private File safeExternalFile(File root, String relativePath) {
+        try {
+            String clean = String.valueOf(relativePath == null ? "" : relativePath).replace("\\", "/");
+            File target = new File(root, clean).getCanonicalFile();
+            String rootPath = root.getCanonicalPath();
+            if (target.getPath().startsWith(rootPath)) return target;
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    private String safeFileName(String name) {
+        StringBuilder out = new StringBuilder();
+        for (char ch : String.valueOf(name == null ? "jarvis_upload.bin" : name).toCharArray()) {
+            if (Character.isLetterOrDigit(ch) || ch == '.' || ch == '_' || ch == '-' || ch == ' ') out.append(ch);
+            else out.append('_');
+        }
+        String clean = out.toString().trim();
+        return clean.isEmpty() ? "jarvis_upload.bin" : clean;
+    }
+
+    private File uniqueInboxFile(File inbox, String name) {
+        File target = new File(inbox, name);
+        if (!target.exists()) return target;
+        int dot = name.lastIndexOf('.');
+        String base = dot > 0 ? name.substring(0, dot) : name;
+        String ext = dot > 0 ? name.substring(dot) : "";
+        for (int i = 1; i < 1000; i++) {
+            target = new File(inbox, base + "_" + i + ext);
+            if (!target.exists()) return target;
+        }
+        return new File(inbox, base + "_" + System.currentTimeMillis() + ext);
+    }
+
+    private byte[] decodeDataUrlBytes(String value) {
+        try {
+            String raw = String.valueOf(value == null ? "" : value);
+            int comma = raw.indexOf(',');
+            String b64 = comma >= 0 ? raw.substring(comma + 1) : raw;
+            return Base64.decode(b64, Base64.DEFAULT);
+        } catch (Exception ignored) {
+            return new byte[0];
+        }
+    }
+
+    private void ackFileRequest(String id, String relativePath, String status, String message) {
+        try {
+            JSONObject json = new JSONObject();
+            json.put("id", id);
+            json.put("relative_path", relativePath);
+            json.put("status", status);
+            json.put("message", message);
+            postJson("/api/mobile/file_request/ack", json);
+        } catch (Exception ignored) {}
+    }
+
+    private void ackToPhoneFile(String id, String status, String message) {
+        try {
+            JSONObject json = new JSONObject();
+            json.put("id", id);
+            json.put("status", status);
+            json.put("message", message);
+            postJson("/api/mobile/to_phone/ack", json);
+        } catch (Exception ignored) {}
+    }
+
+    private JSONObject getJson(String path) throws IOException {
+        String base = serverUrl();
+        if (base.isEmpty()) return new JSONObject();
+        URL url = new URL(base + path);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setConnectTimeout(8000);
+        conn.setReadTimeout(15000);
+        conn.setRequestMethod("GET");
+        conn.setRequestProperty("X-Jarvis-Token", apiToken());
+        conn.setRequestProperty("ngrok-skip-browser-warning", "1");
+        try {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            try (java.io.InputStream in = conn.getInputStream()) {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+            }
+            return new JSONObject(out.toString("UTF-8"));
+        } catch (Exception exc) {
+            return new JSONObject();
+        } finally {
+            conn.disconnect();
+        }
+    }
+
     private void postJson(String path, JSONObject json) throws IOException {
         String base = serverUrl();
         if (base.isEmpty()) return;
         URL url = new URL(base + path);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         conn.setConnectTimeout(8000);
-        conn.setReadTimeout(12000);
+        conn.setReadTimeout(path.equals("/api/mobile/video") ? 90000 : 12000);
         conn.setRequestMethod("POST");
         conn.setDoOutput(true);
         conn.setRequestProperty("Content-Type", "application/json");
         conn.setRequestProperty("X-Jarvis-Token", apiToken());
+        conn.setRequestProperty("ngrok-skip-browser-warning", "1");
         byte[] body = json.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
         conn.setFixedLengthStreamingMode(body.length);
         try (OutputStream out = conn.getOutputStream()) {
@@ -546,6 +940,10 @@ public class CompanionForegroundService extends Service {
     }
 
     private String isoNow() {
-        return String.format(Locale.ROOT, "%tFT%<tTZ", System.currentTimeMillis());
+        return isoFromMillis(System.currentTimeMillis());
+    }
+
+    private String isoFromMillis(long millis) {
+        return String.format(Locale.ROOT, "%tFT%<tTZ", millis);
     }
 }

@@ -43,6 +43,9 @@ import java.util.concurrent.TimeUnit;
 import org.json.JSONObject;
 
 import okhttp3.ResponseBody;
+import okhttp3.OkHttpClient;
+import okhttp3.Interceptor;
+import okhttp3.Request;
 import retrofit2.Call;
 import retrofit2.Response;
 import retrofit2.Retrofit;
@@ -292,8 +295,19 @@ public class MainActivity extends Activity {
         }
         new Thread(() -> {
             try {
+                okhttp3.OkHttpClient client = new okhttp3.OkHttpClient.Builder()
+                        .addInterceptor(chain -> {
+                            okhttp3.Request original = chain.request();
+                            okhttp3.Request req = original.newBuilder()
+                                    .header("ngrok-skip-browser-warning", "1")
+                                    .method(original.method(), original.body())
+                                    .build();
+                            return chain.proceed(req);
+                        })
+                        .build();
                 Retrofit retrofit = new Retrofit.Builder()
                         .baseUrl(baseUrl)
+                        .client(client)
                         .build();
                 CompanionApi api = retrofit.create(CompanionApi.class);
                 Call<ResponseBody> call = api.health(token == null ? "" : token);
@@ -354,7 +368,7 @@ public class MainActivity extends Activity {
             } else {
                 startService(intent);
             }
-            return jsonResult(true, true, "Foreground companion started. Notification stays visible while sharing.");
+            return jsonResult(true, true, "Foreground companion started. Notification stays visible while sharing and recording video.");
         } catch (Exception exc) {
             return jsonResult(true, false, exc.getMessage());
         }

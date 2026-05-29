@@ -1366,6 +1366,92 @@ body {
   margin-top: 12px;
 }
 
+.mobile-file-browser {
+  margin-top: 14px;
+}
+
+.mobile-file-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.mobile-file-toolbar span {
+  color: var(--text-dim);
+  font-size: 0.68rem;
+  letter-spacing: 0.8px;
+  white-space: nowrap;
+}
+
+.mobile-file-list {
+  display: grid;
+  gap: 8px;
+  max-height: 260px;
+  margin-top: 10px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.mobile-file-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 9px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.34);
+}
+
+.mobile-file-row strong,
+.mobile-file-row small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-file-row strong {
+  color: var(--text-primary);
+  font-size: 0.72rem;
+}
+
+.mobile-file-row small {
+  color: var(--text-dim);
+  font-size: 0.62rem;
+}
+
+.mobile-file-empty {
+  padding: 12px;
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  text-align: center;
+}
+
+.mobile-drop-zone {
+  display: grid;
+  place-items: center;
+  min-height: 74px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px dashed rgba(94, 234, 212, 0.36);
+  border-radius: 10px;
+  color: var(--text-dim);
+  background: rgba(20, 184, 166, 0.05);
+  font-size: 0.72rem;
+  text-align: center;
+}
+
+.mobile-drop-zone.dragging {
+  border-color: rgba(94, 234, 212, 0.8);
+  color: var(--text-primary);
+}
+
+.mobile-drop-zone input {
+  display: none;
+}
+
 .camera-preview-container {
   aspect-ratio: 1.24;
   height: auto;

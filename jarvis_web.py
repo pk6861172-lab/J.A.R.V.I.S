@@ -44,6 +44,8 @@ except ImportError:
 
 import subprocess
 import datetime
+import base64
+import uuid
 
 _reminders = []
 _esp_button_lock = threading.Lock()
@@ -74,6 +76,7 @@ BASE_DIR = Path(__file__).resolve().parent
 WEB_DIR = BASE_DIR / "web"
 TASKS_FILE = BASE_DIR / "jarvis_tasks.json"
 MOBILE_COMPANION_DIR = BASE_DIR / ".jarvis_runtime" / "mobile_companion"
+MOBILE_TO_PHONE_DIR = MOBILE_COMPANION_DIR / "to_phone"
 _system_stats_net_lock = threading.Lock()
 _system_stats_net_state = {
     "time": 0.0,
@@ -169,16 +172,60 @@ def _read_mobile_companion_json(name: str) -> dict | None:
         return {"error": str(exc), "path": str(path)}
 
 
-def _mobile_companion_status() -> dict:
-    import base64
-    import mimetypes
+def _mobile_safe_rel_parts(rel: str) -> list[str]:
+    safe_parts = []
+    for part in str(rel or "").replace("\\", "/").split("/"):
+        clean = "".join(ch if ch.isalnum() or ch in "._- " else "_" for ch in part).strip()
+        if clean and clean not in {".", ".."}:
+            safe_parts.append(clean[:120])
+    return safe_parts or ["mobile_file.bin"]
 
+
+def _mobile_uploaded_file_path(rel: str) -> Path:
+    files_dir = (MOBILE_COMPANION_DIR / "files").resolve()
+    target = files_dir.joinpath(*_mobile_safe_rel_parts(rel)).resolve()
+    if not str(target).startswith(str(files_dir)):
+        raise ValueError("Invalid mobile file path")
+    return target
+
+
+def _read_mobile_json_list(name: str) -> list[dict]:
+    data = _read_mobile_companion_json(name)
+    return data if isinstance(data, list) else []
+
+
+def _write_mobile_json_list(name: str, rows: list[dict]) -> None:
+    MOBILE_COMPANION_DIR.mkdir(parents=True, exist_ok=True)
+    (MOBILE_COMPANION_DIR / name).write_text(json.dumps(_make_json_safe(rows), indent=2), encoding="utf-8")
+
+
+def _mobile_pending_file_requests() -> list[dict]:
+    return [row for row in _read_mobile_json_list("pending_file_requests.json") if not row.get("completed_at")]
+
+
+def _mobile_to_phone_queue(include_content: bool = False) -> list[dict]:
+    rows = [row for row in _read_mobile_json_list("to_phone_queue.json") if not row.get("completed_at")]
+    result = []
+    for row in rows:
+        item = dict(row)
+        if include_content and item.get("stored_path"):
+            path = Path(str(item.get("stored_path")))
+            if path.exists() and path.is_file() and path.stat().st_size <= 8_500_000:
+                mime = item.get("mime") or mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+                item["content"] = f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
+        item.pop("stored_path", None)
+        result.append(item)
+    return result
+
+
+def _mobile_companion_status() -> dict:
     session = _read_mobile_companion_json("session.json")
     location = _read_mobile_companion_json("latest_location.json")
     frame = _read_mobile_companion_json("latest_frame.json")
     audio = _read_mobile_companion_json("latest_audio.json")
     file_index = _read_mobile_companion_json("latest_file_index.json")
     latest_file = _read_mobile_companion_json("latest_file.json")
+    latest_video = _read_mobile_companion_json("latest_video.json")
 
     frame_data_url = ""
     if frame and frame.get("path"):
@@ -213,9 +260,12 @@ def _mobile_companion_status() -> dict:
         "frame": frame,
         "frame_data_url": frame_data_url,
         "audio": audio,
+        "latest_video": latest_video,
         "file_index": file_index_public or None,
         "latest_file": latest_file,
         "files": files,
+        "pending_file_requests": _mobile_pending_file_requests(),
+        "to_phone_queue": _mobile_to_phone_queue(False),
     }
 
 
@@ -982,6 +1032,43 @@ class JarvisWebHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
+        if route == "/api/mobile/file/download":
+            if not self._authorized():
+                self._send_json({"ok": False, "error": "Unauthorized"}, HTTPStatus.UNAUTHORIZED)
+                return
+            try:
+                query = parse_qs(urlparse(self.path).query)
+                rel = str(query.get("path", [""])[0] or "")
+                target = _mobile_uploaded_file_path(rel)
+                if not target.exists() or not target.is_file():
+                    self._send_json({"ok": False, "error": "File is indexed but not uploaded to laptop yet."}, HTTPStatus.NOT_FOUND)
+                    return
+                content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+                name = target.name.replace('"', "")
+                self._send(
+                    HTTPStatus.OK,
+                    target.read_bytes(),
+                    content_type,
+                    {"Content-Disposition": f'attachment; filename="{name}"'},
+                )
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+
+        if route == "/api/mobile/file_request/pending":
+            if not self._authorized():
+                self._send_json({"ok": False, "error": "Unauthorized"}, HTTPStatus.UNAUTHORIZED)
+                return
+            self._send_json({"ok": True, "requests": _mobile_pending_file_requests()[:10]})
+            return
+
+        if route == "/api/mobile/to_phone/pending":
+            if not self._authorized():
+                self._send_json({"ok": False, "error": "Unauthorized"}, HTTPStatus.UNAUTHORIZED)
+                return
+            self._send_json({"ok": True, "files": _mobile_to_phone_queue(True)[:5]})
+            return
+
         if route == "/api/tasks":
             if not self._authorized():
                 self._send_json({"ok": False, "error": "Unauthorized"}, HTTPStatus.UNAUTHORIZED)
@@ -1262,6 +1349,10 @@ class JarvisWebHandler(BaseHTTPRequestHandler):
                     "client": self.client_address[0],
                     "connected_at": payload.get("connected_at"),
                     "disconnected_at": payload.get("disconnected_at"),
+                    "video_status": payload.get("video_status"),
+                    "video_error": payload.get("video_error"),
+                    "video_back": payload.get("video_back"),
+                    "video_front": payload.get("video_front"),
                 })
                 self._send_json({"ok": True, "status": status})
             except json.JSONDecodeError:
@@ -1358,6 +1449,162 @@ class JarvisWebHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
+        if route == "/api/mobile/video":
+            if not self._authorized():
+                self._send_json({"ok": False, "error": "Unauthorized"}, HTTPStatus.UNAUTHORIZED)
+                return
+            try:
+                payload = self._read_json()
+                video_bytes, mime = _decode_data_url(str(payload.get("video") or ""))
+                if not video_bytes or len(video_bytes) > 250_000_000:
+                    self._send_json({"ok": False, "error": "Invalid or oversized video"}, HTTPStatus.BAD_REQUEST)
+                    return
+                camera = str(payload.get("camera") or "unknown").strip().lower()
+                if camera not in {"front", "back", "unknown"}:
+                    camera = "unknown"
+                MOBILE_COMPANION_DIR.mkdir(parents=True, exist_ok=True)
+                videos_dir = MOBILE_COMPANION_DIR / "videos"
+                videos_dir.mkdir(parents=True, exist_ok=True)
+                safe_stamp = time.strftime("%Y%m%d_%H%M%S")
+                suffix = ".mp4" if "mp4" in mime or "mpeg" in mime else ".webm" if "webm" in mime else ".bin"
+                video_path = videos_dir / f"{camera}_{safe_stamp}{suffix}"
+                video_path.write_bytes(video_bytes)
+                meta = {
+                    "path": str(video_path),
+                    "camera": camera,
+                    "mime": mime,
+                    "bytes": len(video_bytes),
+                    "started_at": payload.get("started_at"),
+                    "finished_at": payload.get("finished_at"),
+                    "duration_ms": payload.get("duration_ms"),
+                    "width": payload.get("width"),
+                    "height": payload.get("height"),
+                    "client": self.client_address[0],
+                }
+                _write_mobile_companion_json(f"latest_video_{camera}.json", meta)
+                _write_mobile_companion_json("latest_video.json", meta)
+                self._send_json({"ok": True, "path": str(video_path), "bytes": len(video_bytes)})
+            except json.JSONDecodeError:
+                self._send_json({"ok": False, "error": "Invalid JSON"}, HTTPStatus.BAD_REQUEST)
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        if route == "/api/mobile/file_request":
+            if not self._authorized():
+                self._send_json({"ok": False, "error": "Unauthorized"}, HTTPStatus.UNAUTHORIZED)
+                return
+            try:
+                payload = self._read_json()
+                rel = str(payload.get("path") or payload.get("relative_path") or "").strip()
+                if not rel:
+                    self._send_json({"ok": False, "error": "path is required"}, HTTPStatus.BAD_REQUEST)
+                    return
+                request_id = str(uuid.uuid4())
+                rows = _mobile_pending_file_requests()
+                if not any(str(row.get("relative_path")) == rel for row in rows):
+                    rows.append({
+                        "id": request_id,
+                        "relative_path": rel,
+                        "requested_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    })
+                    _write_mobile_json_list("pending_file_requests.json", rows)
+                self._send_json({"ok": True, "queued": True, "requests": rows})
+            except json.JSONDecodeError:
+                self._send_json({"ok": False, "error": "Invalid JSON"}, HTTPStatus.BAD_REQUEST)
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        if route == "/api/mobile/file_request/ack":
+            if not self._authorized():
+                self._send_json({"ok": False, "error": "Unauthorized"}, HTTPStatus.UNAUTHORIZED)
+                return
+            try:
+                payload = self._read_json()
+                req_id = str(payload.get("id") or "").strip()
+                rel = str(payload.get("relative_path") or "").strip()
+                rows = _read_mobile_json_list("pending_file_requests.json")
+                changed = False
+                for row in rows:
+                    if (req_id and row.get("id") == req_id) or (rel and row.get("relative_path") == rel):
+                        row["completed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                        row["status"] = str(payload.get("status") or "done")
+                        row["message"] = str(payload.get("message") or "")
+                        changed = True
+                if changed:
+                    _write_mobile_json_list("pending_file_requests.json", rows)
+                self._send_json({"ok": True, "changed": changed})
+            except json.JSONDecodeError:
+                self._send_json({"ok": False, "error": "Invalid JSON"}, HTTPStatus.BAD_REQUEST)
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        if route == "/api/mobile/to_phone":
+            if not self._authorized():
+                self._send_json({"ok": False, "error": "Unauthorized"}, HTTPStatus.UNAUTHORIZED)
+                return
+            try:
+                payload = self._read_json()
+                content, mime = _decode_data_url(str(payload.get("content") or ""))
+                if not content or len(content) > 8_500_000:
+                    self._send_json({"ok": False, "error": "Invalid or oversized upload"}, HTTPStatus.BAD_REQUEST)
+                    return
+                rel = str(payload.get("name") or payload.get("relative_path") or "jarvis_upload.bin")
+                safe_parts = _mobile_safe_rel_parts(rel)
+                queue_id = str(uuid.uuid4())
+                MOBILE_TO_PHONE_DIR.mkdir(parents=True, exist_ok=True)
+                target = (MOBILE_TO_PHONE_DIR / f"{queue_id}_{safe_parts[-1]}").resolve()
+                if not str(target).startswith(str(MOBILE_TO_PHONE_DIR.resolve())):
+                    self._send_json({"ok": False, "error": "Invalid upload path"}, HTTPStatus.BAD_REQUEST)
+                    return
+                target.write_bytes(content)
+                rows = _read_mobile_json_list("to_phone_queue.json")
+                item = {
+                    "id": queue_id,
+                    "name": safe_parts[-1],
+                    "relative_path": "/".join(safe_parts),
+                    "bytes": len(content),
+                    "mime": mime,
+                    "stored_path": str(target),
+                    "queued_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                rows.append(item)
+                _write_mobile_json_list("to_phone_queue.json", rows)
+                public_item = dict(item)
+                public_item.pop("stored_path", None)
+                self._send_json({"ok": True, "file": public_item})
+            except json.JSONDecodeError:
+                self._send_json({"ok": False, "error": "Invalid JSON"}, HTTPStatus.BAD_REQUEST)
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        if route == "/api/mobile/to_phone/ack":
+            if not self._authorized():
+                self._send_json({"ok": False, "error": "Unauthorized"}, HTTPStatus.UNAUTHORIZED)
+                return
+            try:
+                payload = self._read_json()
+                queue_id = str(payload.get("id") or "").strip()
+                rows = _read_mobile_json_list("to_phone_queue.json")
+                changed = False
+                for row in rows:
+                    if queue_id and row.get("id") == queue_id:
+                        row["completed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                        row["status"] = str(payload.get("status") or "saved")
+                        row["message"] = str(payload.get("message") or "")
+                        changed = True
+                if changed:
+                    _write_mobile_json_list("to_phone_queue.json", rows)
+                self._send_json({"ok": True, "changed": changed})
+            except json.JSONDecodeError:
+                self._send_json({"ok": False, "error": "Invalid JSON"}, HTTPStatus.BAD_REQUEST)
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
         if route == "/api/mobile/file_index":
             if not self._authorized():
                 self._send_json({"ok": False, "error": "Unauthorized"}, HTTPStatus.UNAUTHORIZED)
@@ -1416,6 +1663,16 @@ class JarvisWebHandler(BaseHTTPRequestHandler):
                     "modified_at": payload.get("modified_at"),
                     "client": self.client_address[0],
                 })
+                rows = _read_mobile_json_list("pending_file_requests.json")
+                changed = False
+                safe_rel = "/".join(safe_parts)
+                for row in rows:
+                    if not row.get("completed_at") and row.get("relative_path") == safe_rel:
+                        row["completed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                        row["status"] = "uploaded"
+                        changed = True
+                if changed:
+                    _write_mobile_json_list("pending_file_requests.json", rows)
                 self._send_json({"ok": True, "path": str(target), "bytes": len(content)})
             except json.JSONDecodeError:
                 self._send_json({"ok": False, "error": "Invalid JSON"}, HTTPStatus.BAD_REQUEST)
