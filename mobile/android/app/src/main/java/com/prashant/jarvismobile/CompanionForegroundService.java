@@ -75,6 +75,7 @@ public class CompanionForegroundService extends Service {
     private boolean frontVideoAttempted = false;
     private CameraDevice frontCameraDevice;
     private CameraCaptureSession frontCameraSession;
+    private boolean backVideoAttempted = false;
     private MediaRecorder frontVideoRecorder;
     private File frontVideoFile;
     private long frontVideoStartedAt = 0L;
@@ -250,7 +251,7 @@ public class CompanionForegroundService extends Service {
             JSONObject json = new JSONObject();
             json.put("status", status);
             json.put(status.equals("connected") ? "connected_at" : "disconnected_at", isoNow());
-            json.put("video_back", backVideoRecording ? "recording" : "idle");
+            json.put("video_back", backVideoRecording ? "recording" : backVideoAttempted ? "failed_or_unsupported" : "not_started");
             json.put("video_front", frontVideoRecording ? "recording" : frontVideoAttempted ? "failed_or_unsupported" : "not_started");
             postJson("/api/mobile/session", json);
         } catch (Exception ignored) {}
@@ -263,7 +264,7 @@ public class CompanionForegroundService extends Service {
             json.put("connected_at", isoNow());
             json.put("video_status", status == null ? "" : status);
             json.put("video_error", error == null ? "" : error);
-            json.put("video_back", backVideoRecording ? "recording" : "idle");
+            json.put("video_back", backVideoRecording ? "recording" : backVideoAttempted ? "failed_or_unsupported" : "not_started");
             json.put("video_front", frontVideoRecording ? "recording" : frontVideoAttempted ? "failed_or_unsupported" : "not_started");
             postJson("/api/mobile/session", json);
         } catch (Exception ignored) {}
@@ -374,14 +375,19 @@ public class CompanionForegroundService extends Service {
         try {
             CameraManager manager = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
             if (manager == null) return;
-            String cameraId = chooseCamera(manager, CameraCharacteristics.LENS_FACING_BACK);
+            String cameraId = chooseCamera(manager, CameraCharacteristics.LENS_FACING_FRONT);
             if (cameraId == null) {
-                postVideoStatus("camera_failed", "No back camera found.");
-                return;
+                postVideoStatus("front_unavailable", "No front camera found; falling back to back camera.");
+                cameraId = chooseCamera(manager, CameraCharacteristics.LENS_FACING_BACK);
+                if (cameraId == null) {
+                    postVideoStatus("camera_failed", "No front or back camera found.");
+                    return;
+                }
             }
-            prepareBackVideoRecorder();
-            if (backVideoRecorder == null) {
-                postVideoStatus("back_video_prepare_failed", "Back video recorder could not prepare; frame sharing will continue.");
+            frontVideoAttempted = true;
+            prepareFrontVideoRecorder();
+            if (frontVideoRecorder == null) {
+                postVideoStatus("front_video_prepare_failed", "Front video recorder could not prepare; frame sharing will continue.");
             }
             imageReader = ImageReader.newInstance(640, 480, ImageFormat.JPEG, 2);
             imageReader.setOnImageAvailableListener(reader -> {
@@ -431,14 +437,14 @@ public class CompanionForegroundService extends Service {
         try {
             if (cameraDevice == null || imageReader == null) return;
             Surface surface = imageReader.getSurface();
-            boolean hasVideoSurface = backVideoRecorder != null;
+            boolean hasVideoSurface = frontVideoRecorder != null;
             CaptureRequest.Builder request = cameraDevice.createCaptureRequest(
                     hasVideoSurface ? CameraDevice.TEMPLATE_RECORD : CameraDevice.TEMPLATE_PREVIEW
             );
             request.addTarget(surface);
             List<Surface> surfaces = new ArrayList<>();
             surfaces.add(surface);
-            Surface videoSurface = backVideoRecorder == null ? null : backVideoRecorder.getSurface();
+            Surface videoSurface = frontVideoRecorder == null ? null : frontVideoRecorder.getSurface();
             if (videoSurface != null) {
                 surfaces.add(videoSurface);
                 request.addTarget(videoSurface);
@@ -449,42 +455,43 @@ public class CompanionForegroundService extends Service {
                     cameraSession = session;
                     try {
                         session.setRepeatingRequest(request.build(), null, worker);
-                        if (backVideoRecorder != null && !backVideoRecording) {
-                            backVideoRecorder.start();
-                            backVideoRecording = true;
-                            backVideoStartedAt = System.currentTimeMillis();
-                            postVideoStatus("back_recording", "");
+                        if (frontVideoRecorder != null && !frontVideoRecording) {
+                            frontVideoRecorder.start();
+                            frontVideoRecording = true;
+                            frontVideoStartedAt = System.currentTimeMillis();
+                            frontVideoAttempted = true;
+                            postVideoStatus("front_recording", "");
                             worker.postDelayed(() -> {
-                                if (!running || frontVideoAttempted) return;
+                                if (!running || backVideoAttempted) return;
                                 try {
                                     CameraManager manager = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
-                                    if (manager != null) startFrontVideoLoop(manager);
+                                    if (manager != null) startBackVideoLoop(manager);
                                 } catch (Exception ignored) {}
                             }, 3000);
                         }
                     } catch (Exception exc) {
-                        postVideoStatus("back_recording_failed", exc.getClass().getSimpleName() + ": " + exc.getMessage());
+                        postVideoStatus("front_recording_failed", exc.getClass().getSimpleName() + ": " + exc.getMessage());
                     }
                 }
 
                 @Override public void onConfigureFailed(CameraCaptureSession session) {
-                    postVideoStatus("back_session_failed", "Back camera session configuration failed.");
+                    postVideoStatus("front_session_failed", "Front camera session configuration failed.");
                 }
             }, worker);
         } catch (Exception exc) {
-            postVideoStatus("back_session_failed", exc.getClass().getSimpleName() + ": " + exc.getMessage());
+            postVideoStatus("front_session_failed", exc.getClass().getSimpleName() + ": " + exc.getMessage());
         }
     }
 
-    private void prepareBackVideoRecorder() {
+    private void prepareFrontVideoRecorder() {
         try {
-            backVideoFile = File.createTempFile("jarvis_back_", ".mp4", getCacheDir());
-            backVideoRecorder = buildVideoRecorder(backVideoFile);
+            frontVideoFile = File.createTempFile("jarvis_front_", ".mp4", getCacheDir());
+            frontVideoRecorder = buildVideoRecorder(frontVideoFile);
         } catch (Exception exc) {
-            releaseVideoRecorder(backVideoRecorder);
-            backVideoRecorder = null;
-            backVideoFile = null;
-            postVideoStatus("back_prepare_failed", exc.getClass().getSimpleName() + ": " + exc.getMessage());
+            releaseVideoRecorder(frontVideoRecorder);
+            frontVideoRecorder = null;
+            frontVideoFile = null;
+            postVideoStatus("front_prepare_failed", exc.getClass().getSimpleName() + ": " + exc.getMessage());
         }
     }
 
@@ -501,18 +508,18 @@ public class CompanionForegroundService extends Service {
         return videoRecorder;
     }
 
-    private void startFrontVideoLoop(CameraManager manager) {
-        frontVideoAttempted = true;
+    private void startBackVideoLoop(CameraManager manager) {
+        backVideoAttempted = true;
         try {
-            String frontId = chooseCamera(manager, CameraCharacteristics.LENS_FACING_FRONT);
-            if (frontId == null || !running) {
-                postVideoStatus("front_unavailable", "No front camera available or service stopped.");
+            String backId = chooseCamera(manager, CameraCharacteristics.LENS_FACING_BACK);
+            if (backId == null || !running) {
+                postVideoStatus("back_unavailable", "No back camera available or service stopped.");
                 return;
             }
-            frontVideoFile = File.createTempFile("jarvis_front_", ".mp4", getCacheDir());
-            frontVideoRecorder = buildVideoRecorder(frontVideoFile);
-            Surface videoSurface = frontVideoRecorder.getSurface();
-            manager.openCamera(frontId, new CameraDevice.StateCallback() {
+            backVideoFile = File.createTempFile("jarvis_back_", ".mp4", getCacheDir());
+            backVideoRecorder = buildVideoRecorder(backVideoFile);
+            Surface videoSurface = backVideoRecorder.getSurface();
+            manager.openCamera(backId, new CameraDevice.StateCallback() {
                 @Override
                 public void onOpened(CameraDevice camera) {
                     frontCameraDevice = camera;
@@ -525,35 +532,35 @@ public class CompanionForegroundService extends Service {
                                 frontCameraSession = session;
                                 try {
                                     session.setRepeatingRequest(request.build(), null, worker);
-                                    if (frontVideoRecorder != null && !frontVideoRecording) {
-                                        frontVideoRecorder.start();
-                                        frontVideoRecording = true;
-                                        frontVideoStartedAt = System.currentTimeMillis();
-                                        postVideoStatus("front_recording", "");
+                                    if (backVideoRecorder != null && !backVideoRecording) {
+                                        backVideoRecorder.start();
+                                        backVideoRecording = true;
+                                        backVideoStartedAt = System.currentTimeMillis();
+                                        postVideoStatus("back_recording", "");
                                     }
                                 } catch (Exception exc) {
-                                    postVideoStatus("front_recording_failed", exc.getClass().getSimpleName() + ": " + exc.getMessage());
+                                    postVideoStatus("back_recording_failed", exc.getClass().getSimpleName() + ": " + exc.getMessage());
                                 }
                             }
 
                             @Override public void onConfigureFailed(CameraCaptureSession session) {
-                                postVideoStatus("front_session_failed", "Front camera session configuration failed.");
+                                postVideoStatus("back_session_failed", "Back camera session configuration failed.");
                             }
                         }, worker);
                     } catch (Exception exc) {
-                        postVideoStatus("front_session_failed", exc.getClass().getSimpleName() + ": " + exc.getMessage());
+                        postVideoStatus("back_session_failed", exc.getClass().getSimpleName() + ": " + exc.getMessage());
                     }
                 }
 
                 @Override public void onDisconnected(CameraDevice camera) { camera.close(); }
                 @Override public void onError(CameraDevice camera, int error) {
-                    postVideoStatus("front_camera_error", "Camera error " + error);
+                    postVideoStatus("back_camera_error", "Camera error " + error);
                     camera.close();
                 }
             }, worker);
         } catch (Exception exc) {
-            postVideoStatus("front_failed", exc.getClass().getSimpleName() + ": " + exc.getMessage());
-            stopFrontVideoLoop(false);
+            postVideoStatus("back_failed", exc.getClass().getSimpleName() + ": " + exc.getMessage());
+            stopBackVideoLoop(false);
         }
     }
 
@@ -571,6 +578,7 @@ public class CompanionForegroundService extends Service {
         frontCameraDevice = null;
         imageReader = null;
         frontVideoAttempted = false;
+        backVideoAttempted = false;
     }
 
     private void stopBackVideoLoop(boolean upload) {

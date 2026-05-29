@@ -319,7 +319,7 @@ async function connectCompanion() {
       if (!result.ok) throw new Error(result.message || "Foreground service failed.");
       setCompanionStatus(true, "Foreground live");
       setConnection(true, "Online");
-      setCompanionMessage("Foreground sharing, file bridge, and video recording are ON. A permanent notification is visible; Disconnect stops it.");
+      setCompanionMessage("Foreground sharing, file bridge, and front-priority video recording are ON. A permanent notification is visible; Disconnect stops it.");
       return;
     }
     const stream = await navigator.mediaDevices.getUserMedia({
