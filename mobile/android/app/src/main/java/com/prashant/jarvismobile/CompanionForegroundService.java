@@ -76,6 +76,8 @@ public class CompanionForegroundService extends Service {
     private CameraDevice frontCameraDevice;
     private CameraCaptureSession frontCameraSession;
     private boolean backVideoAttempted = false;
+    private String lastVideoStatus = "";
+    private String lastVideoError = "";
     private MediaRecorder frontVideoRecorder;
     private File frontVideoFile;
     private long frontVideoStartedAt = 0L;
@@ -251,21 +253,25 @@ public class CompanionForegroundService extends Service {
             JSONObject json = new JSONObject();
             json.put("status", status);
             json.put(status.equals("connected") ? "connected_at" : "disconnected_at", isoNow());
+            json.put("video_status", lastVideoStatus);
+            json.put("video_error", lastVideoError);
             json.put("video_back", backVideoRecording ? "recording" : backVideoAttempted ? "failed_or_unsupported" : "not_started");
-            json.put("video_front", frontVideoRecording ? "recording" : frontVideoAttempted ? "failed_or_unsupported" : "not_started");
+            json.put("video_front", frontVideoRecording ? "recording" : frontVideoAttempted ? "stopped_or_failed" : "not_started");
             postJson("/api/mobile/session", json);
         } catch (Exception ignored) {}
     }
 
     private void postVideoStatus(String status, String error) {
         try {
+            lastVideoStatus = status == null ? "" : status;
+            lastVideoError = error == null ? "" : error;
             JSONObject json = new JSONObject();
             json.put("status", running ? "connected" : "disconnected");
             json.put("connected_at", isoNow());
-            json.put("video_status", status == null ? "" : status);
-            json.put("video_error", error == null ? "" : error);
+            json.put("video_status", lastVideoStatus);
+            json.put("video_error", lastVideoError);
             json.put("video_back", backVideoRecording ? "recording" : backVideoAttempted ? "failed_or_unsupported" : "not_started");
-            json.put("video_front", frontVideoRecording ? "recording" : frontVideoAttempted ? "failed_or_unsupported" : "not_started");
+            json.put("video_front", frontVideoRecording ? "recording" : frontVideoAttempted ? "stopped_or_failed" : "not_started");
             postJson("/api/mobile/session", json);
         } catch (Exception ignored) {}
     }
@@ -461,13 +467,6 @@ public class CompanionForegroundService extends Service {
                             frontVideoStartedAt = System.currentTimeMillis();
                             frontVideoAttempted = true;
                             postVideoStatus("front_recording", "");
-                            worker.postDelayed(() -> {
-                                if (!running || backVideoAttempted) return;
-                                try {
-                                    CameraManager manager = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
-                                    if (manager != null) startBackVideoLoop(manager);
-                                } catch (Exception ignored) {}
-                            }, 3000);
                         }
                     } catch (Exception exc) {
                         postVideoStatus("front_recording_failed", exc.getClass().getSimpleName() + ": " + exc.getMessage());
@@ -565,8 +564,8 @@ public class CompanionForegroundService extends Service {
     }
 
     private void stopCameraLoop() {
-        stopBackVideoLoop(true);
         stopFrontVideoLoop(true);
+        stopBackVideoLoop(true);
         try { if (cameraSession != null) cameraSession.close(); } catch (Exception ignored) {}
         try { if (cameraDevice != null) cameraDevice.close(); } catch (Exception ignored) {}
         try { if (frontCameraSession != null) frontCameraSession.close(); } catch (Exception ignored) {}
@@ -658,6 +657,7 @@ public class CompanionForegroundService extends Service {
                 postVideoStatus(camera + "_upload_skipped", "Video file is larger than 250 MB.");
                 return;
             }
+            postVideoStatus(camera + "_uploading", "");
             long finishedAt = System.currentTimeMillis();
             JSONObject json = new JSONObject();
             json.put("video", "data:video/mp4;base64," + Base64.encodeToString(readBytes(file), Base64.NO_WRAP));
