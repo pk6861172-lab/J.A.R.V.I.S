@@ -149,7 +149,7 @@ function renderPermissionStatus(status) {
   $("permCamera").textContent = `Camera: ${data.camera ? "granted" : "needed"}`;
   $("permMic").textContent = `Mic: ${data.microphone ? "granted" : "needed"}`;
   $("permLocation").textContent = `Location: ${(data.fine_location || data.coarse_location) ? "granted" : "needed"}`;
-  $("permStorage").textContent = `Storage: ${data.storage ? "granted" : "needed"}`;
+  $("permStorage").textContent = `Notify/storage: ${(data.notifications && data.storage) ? "granted" : "needed"}`;
 }
 
 function refreshCompanionPermissions() {
@@ -284,6 +284,15 @@ async function connectCompanion() {
   try {
     requireCompanionUrl();
     await api("/api/health");
+    if (nativeAvailable() && window.JarvisAndroid.startCompanionService) {
+      const raw = window.JarvisAndroid.startCompanionService(state.serverUrl, state.apiToken || "");
+      const result = raw ? JSON.parse(raw) : { ok: false, message: "No native service result." };
+      if (!result.ok) throw new Error(result.message || "Foreground service failed.");
+      setCompanionStatus(true, "Foreground live");
+      setConnection(true, "Online");
+      setCompanionMessage("Foreground sharing is ON. A permanent notification is visible; Disconnect stops it.");
+      return;
+    }
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: { ideal: "environment" }, width: { ideal: 640 }, height: { ideal: 480 } },
       audio: true,
@@ -306,6 +315,11 @@ async function connectCompanion() {
 }
 
 async function disconnectCompanion(notify = true) {
+  if (nativeAvailable() && window.JarvisAndroid.stopCompanionService) {
+    try {
+      window.JarvisAndroid.stopCompanionService();
+    } catch {}
+  }
   if (state.companion.frameTimer) clearInterval(state.companion.frameTimer);
   state.companion.frameTimer = null;
   if (state.companion.locationWatch !== null && navigator.geolocation) {

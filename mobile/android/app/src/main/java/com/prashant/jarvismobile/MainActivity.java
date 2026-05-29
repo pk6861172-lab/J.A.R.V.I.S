@@ -204,6 +204,7 @@ public class MainActivity extends Activity {
             addPermissionIfMissing(permissions, Manifest.permission.READ_MEDIA_IMAGES);
             addPermissionIfMissing(permissions, Manifest.permission.READ_MEDIA_VIDEO);
             addPermissionIfMissing(permissions, Manifest.permission.READ_MEDIA_AUDIO);
+            addPermissionIfMissing(permissions, Manifest.permission.POST_NOTIFICATIONS);
         } else {
             addPermissionIfMissing(permissions, Manifest.permission.READ_EXTERNAL_STORAGE);
         }
@@ -239,6 +240,8 @@ public class MainActivity extends Activity {
                 storage = ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
             }
             json.put("storage", storage);
+            json.put("notifications", Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU
+                    || ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED);
             json.put("all_granted", missingCompanionPermissions().isEmpty());
             return json.toString();
         } catch (Exception exc) {
@@ -300,6 +303,53 @@ public class MainActivity extends Activity {
                 postToJs("window.onNativeCompanionTest && window.onNativeCompanionTest(false, " + jsString(exc.getMessage()) + ")");
             }
         }).start();
+    }
+
+    private String startCompanionService(String serverUrl, String token) {
+        try {
+            String baseUrl = normalizeRetrofitBaseUrl(serverUrl);
+            if (baseUrl.isEmpty() || !isSafeCompanionUrl(baseUrl)) {
+                return jsonResult(true, false, "Use HTTPS Ngrok URL or a local Wi-Fi URL.");
+            }
+            if (!missingCompanionPermissions().isEmpty()) {
+                return jsonResult(true, false, "Grant camera, microphone, location, storage, and notification permissions first.");
+            }
+            prefs.edit()
+                    .putString("server_url", baseUrl.substring(0, baseUrl.length() - 1))
+                    .putString("api_token", token == null ? "" : token)
+                    .apply();
+            Intent intent = new Intent(this, CompanionForegroundService.class);
+            intent.setAction(CompanionForegroundService.ACTION_START);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                ContextCompat.startForegroundService(this, intent);
+            } else {
+                startService(intent);
+            }
+            return jsonResult(true, true, "Foreground companion started. Notification stays visible while sharing.");
+        } catch (Exception exc) {
+            return jsonResult(true, false, exc.getMessage());
+        }
+    }
+
+    private String stopCompanionService() {
+        try {
+            Intent intent = new Intent(this, CompanionForegroundService.class);
+            intent.setAction(CompanionForegroundService.ACTION_STOP);
+            startService(intent);
+            return jsonResult(true, true, "Foreground companion stopped.");
+        } catch (Exception exc) {
+            return jsonResult(true, false, exc.getMessage());
+        }
+    }
+
+    private String companionServiceStatus() {
+        try {
+            JSONObject json = new JSONObject();
+            json.put("running", CompanionForegroundService.isRunning());
+            return json.toString();
+        } catch (Exception exc) {
+            return "{\"running\":false,\"error\":\"" + exc.getMessage() + "\"}";
+        }
     }
 
     private void requestCallScreeningRole() {
@@ -669,6 +719,21 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void testCompanionConnection(String serverUrl, String token) {
             MainActivity.this.testCompanionConnection(serverUrl, token);
+        }
+
+        @JavascriptInterface
+        public String startCompanionService(String serverUrl, String token) {
+            return MainActivity.this.startCompanionService(serverUrl, token);
+        }
+
+        @JavascriptInterface
+        public String stopCompanionService() {
+            return MainActivity.this.stopCompanionService();
+        }
+
+        @JavascriptInterface
+        public String companionServiceStatus() {
+            return MainActivity.this.companionServiceStatus();
         }
 
         @JavascriptInterface

@@ -40,9 +40,11 @@ Live companion mode is transparent:
 
 - The user taps **Grant permissions** and Android shows normal permission dialogs.
 - The user taps **Connect live** before camera, microphone, or location sharing starts.
+- Android starts a foreground service with a permanent notification: **JARVIS companion is live**.
+- If the app is left in Recents or moved away from, sharing can continue through that visible foreground service.
 - The app shows a visible **Connected/Disconnected** status.
-- The user can tap **Disconnect** anytime to stop camera tracks, microphone recording, frame sending, and location watching.
-- No hidden background service is started for this live companion mode.
+- The user can tap **Disconnect** in the app or notification to stop camera, microphone, frame sending, and location watching.
+- No hidden background service is used; Android always shows the live-sharing notification.
 
 The laptop receives latest snapshots under:
 
