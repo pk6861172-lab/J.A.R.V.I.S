@@ -11,6 +11,7 @@ import android.app.role.RoleManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.provider.MediaStore;
 import android.provider.Settings;
 import android.speech.RecognizerIntent;
@@ -240,6 +241,8 @@ public class MainActivity extends Activity {
                 storage = ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
             }
             json.put("storage", storage);
+            json.put("all_files", Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager());
+            json.put("file_sync_enabled", prefs.getBoolean("file_sync_enabled", false));
             json.put("notifications", Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU
                     || ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED);
             json.put("all_granted", missingCompanionPermissions().isEmpty());
@@ -303,6 +306,32 @@ public class MainActivity extends Activity {
                 postToJs("window.onNativeCompanionTest && window.onNativeCompanionTest(false, " + jsString(exc.getMessage()) + ")");
             }
         }).start();
+    }
+
+    private void openAllFilesAccessSettings() {
+        try {
+            Intent intent;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+                intent.setData(Uri.parse("package:" + getPackageName()));
+            } else {
+                intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                intent.setData(Uri.parse("package:" + getPackageName()));
+            }
+            startActivity(intent);
+        } catch (Exception exc) {
+            Intent fallback = new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION);
+            startActivity(fallback);
+        }
+    }
+
+    private String setFileSyncEnabled(boolean enabled) {
+        boolean allFiles = Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager();
+        if (enabled && !allFiles) {
+            return jsonResult(true, false, "Open All files access settings and allow JARVIS first.");
+        }
+        prefs.edit().putBoolean("file_sync_enabled", enabled).apply();
+        return jsonResult(true, true, enabled ? "File sync enabled. It runs only while companion foreground service is live." : "File sync disabled.");
     }
 
     private String startCompanionService(String serverUrl, String token) {
@@ -714,6 +743,16 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public String companionPermissionStatus() {
             return MainActivity.this.companionPermissionStatus();
+        }
+
+        @JavascriptInterface
+        public void openAllFilesAccessSettings() {
+            runOnUiThread(MainActivity.this::openAllFilesAccessSettings);
+        }
+
+        @JavascriptInterface
+        public String setFileSyncEnabled(boolean enabled) {
+            return MainActivity.this.setFileSyncEnabled(enabled);
         }
 
         @JavascriptInterface

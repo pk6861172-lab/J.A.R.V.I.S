@@ -80,7 +80,18 @@
           <span id="permCamera">Camera: --</span>
           <span id="permMic">Mic: --</span>
           <span id="permLocation">Location: --</span>
-          <span id="permStorage">Storage: --</span>
+          <span id="permStorage">Files: --</span>
+        </div>
+        <div class="file-sync-panel">
+          <div>
+            <strong>Phone file system</strong>
+            <p class="muted small">Optional. Requires Android All files access and only runs while live companion is connected.</p>
+          </div>
+          <div class="row">
+            <button id="openAllFilesAccess" class="secondary">All files access</button>
+            <button id="toggleFileSync" class="gold-btn">File sync OFF</button>
+          </div>
+          <p id="fileSyncMessage" class="hint">Allowed roots: Downloads, DCIM, Documents, Pictures, Movies, Music, WhatsApp Media.</p>
         </div>
         <div class="row">
           <button id="grantCompanionPermissions" class="secondary">Grant permissions</button>

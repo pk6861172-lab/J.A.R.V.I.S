@@ -247,6 +247,19 @@ input:focus, textarea:focus {
   font-weight: 700;
 }
 
+.file-sync-panel {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid rgba(255, 207, 106, 0.22);
+  border-radius: 16px;
+  background: rgba(255, 207, 106, 0.07);
+}
+
+.file-sync-panel strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
 .call-chip.ok {
   color: #06130e;
   background: linear-gradient(135deg, var(--green), rgba(255,255,255,0.7));

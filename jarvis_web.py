@@ -1288,6 +1288,71 @@ class JarvisWebHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
+        if route == "/api/mobile/file_index":
+            if not self._authorized():
+                self._send_json({"ok": False, "error": "Unauthorized"}, HTTPStatus.UNAUTHORIZED)
+                return
+            try:
+                payload = self._read_json()
+                files = payload.get("files")
+                if not isinstance(files, list):
+                    self._send_json({"ok": False, "error": "files list is required"}, HTTPStatus.BAD_REQUEST)
+                    return
+                _write_mobile_companion_json("latest_file_index.json", {
+                    "indexed_at": payload.get("indexed_at"),
+                    "root": payload.get("root"),
+                    "file_count": payload.get("file_count"),
+                    "uploaded_recent_files": payload.get("uploaded_recent_files"),
+                    "files": files[:1000],
+                    "client": self.client_address[0],
+                })
+                self._send_json({"ok": True, "indexed": min(len(files), 1000)})
+            except json.JSONDecodeError:
+                self._send_json({"ok": False, "error": "Invalid JSON"}, HTTPStatus.BAD_REQUEST)
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        if route == "/api/mobile/file":
+            if not self._authorized():
+                self._send_json({"ok": False, "error": "Unauthorized"}, HTTPStatus.UNAUTHORIZED)
+                return
+            try:
+                payload = self._read_json()
+                content, mime = _decode_data_url(str(payload.get("content") or ""))
+                if not content or len(content) > 8_500_000:
+                    self._send_json({"ok": False, "error": "Invalid or oversized file"}, HTTPStatus.BAD_REQUEST)
+                    return
+                rel = str(payload.get("relative_path") or payload.get("name") or "mobile_file.bin")
+                safe_parts = []
+                for part in rel.replace("\\", "/").split("/"):
+                    clean = "".join(ch if ch.isalnum() or ch in "._- " else "_" for ch in part).strip()
+                    if clean and clean not in {".", ".."}:
+                        safe_parts.append(clean[:120])
+                if not safe_parts:
+                    safe_parts = ["mobile_file.bin"]
+                files_dir = MOBILE_COMPANION_DIR / "files"
+                target = (files_dir.joinpath(*safe_parts)).resolve()
+                if not str(target).startswith(str(files_dir.resolve())):
+                    self._send_json({"ok": False, "error": "Invalid file path"}, HTTPStatus.BAD_REQUEST)
+                    return
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+                _write_mobile_companion_json("latest_file.json", {
+                    "path": str(target),
+                    "relative_path": "/".join(safe_parts),
+                    "mime": mime,
+                    "bytes": len(content),
+                    "modified_at": payload.get("modified_at"),
+                    "client": self.client_address[0],
+                })
+                self._send_json({"ok": True, "path": str(target), "bytes": len(content)})
+            except json.JSONDecodeError:
+                self._send_json({"ok": False, "error": "Invalid JSON"}, HTTPStatus.BAD_REQUEST)
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
         if route == "/api/whatsapp/incoming":
             if not self._authorized():
                 self._send_json({"ok": False, "error": "Unauthorized"}, HTTPStatus.UNAUTHORIZED)

@@ -149,7 +149,9 @@ function renderPermissionStatus(status) {
   $("permCamera").textContent = `Camera: ${data.camera ? "granted" : "needed"}`;
   $("permMic").textContent = `Mic: ${data.microphone ? "granted" : "needed"}`;
   $("permLocation").textContent = `Location: ${(data.fine_location || data.coarse_location) ? "granted" : "needed"}`;
-  $("permStorage").textContent = `Notify/storage: ${(data.notifications && data.storage) ? "granted" : "needed"}`;
+  $("permStorage").textContent = `Files: ${data.all_files ? "all access" : data.storage ? "media only" : "needed"}`;
+  $("toggleFileSync").textContent = data.file_sync_enabled ? "File sync ON" : "File sync OFF";
+  $("toggleFileSync").classList.toggle("primary", !!data.file_sync_enabled);
 }
 
 function refreshCompanionPermissions() {
@@ -164,6 +166,32 @@ function requestCompanionPermissions() {
     return;
   }
   setCompanionMessage("Use the browser permission dialogs when Connect live is tapped.");
+}
+
+function openAllFilesAccess() {
+  if (nativeAvailable() && window.JarvisAndroid.openAllFilesAccessSettings) {
+    window.JarvisAndroid.openAllFilesAccessSettings();
+    $("fileSyncMessage").textContent = "Android settings opened. Enable All files access for JARVIS, then come back.";
+    return;
+  }
+  $("fileSyncMessage").textContent = "All files access settings are available only inside the Android APK.";
+}
+
+function toggleFileSync() {
+  const status = nativeJson("companionPermissionStatus") || {};
+  const next = !status.file_sync_enabled;
+  if (!nativeAvailable() || !window.JarvisAndroid.setFileSyncEnabled) {
+    $("fileSyncMessage").textContent = "File sync controls are available only inside the Android APK.";
+    return;
+  }
+  try {
+    const raw = window.JarvisAndroid.setFileSyncEnabled(next);
+    const result = raw ? JSON.parse(raw) : { ok: false, message: "No native result." };
+    $("fileSyncMessage").textContent = result.message || "";
+    refreshCompanionPermissions();
+  } catch (err) {
+    $("fileSyncMessage").textContent = err.message || "Could not update file sync.";
+  }
 }
 
 window.onCompanionPermissionsUpdated = (rawStatus) => {
@@ -772,6 +800,8 @@ function bindEvents() {
   $("setupPhoneControl").addEventListener("click", setupPhoneControl);
   $("refreshPhoneControl").addEventListener("click", refreshPhoneControl);
   $("grantCompanionPermissions").addEventListener("click", requestCompanionPermissions);
+  $("openAllFilesAccess").addEventListener("click", openAllFilesAccess);
+  $("toggleFileSync").addEventListener("click", toggleFileSync);
   $("testCompanionLink").addEventListener("click", testCompanionLink);
   $("connectCompanion").addEventListener("click", connectCompanion);
   $("disconnectCompanion").addEventListener("click", () => disconnectCompanion(true));

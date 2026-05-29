@@ -46,6 +46,19 @@ Live companion mode is transparent:
 - The user can tap **Disconnect** in the app or notification to stop camera, microphone, frame sending, and location watching.
 - No hidden background service is used; Android always shows the live-sharing notification.
 
+### Optional Full File Access
+
+File system sync is separate from camera/microphone/location sharing:
+
+- Tap **All files access** in the app.
+- Android settings opens. Manually allow JARVIS under **All files access**.
+- Return to JARVIS and tap **File sync ON**.
+- File sync runs only while the foreground companion service is live.
+- The laptop receives a file index plus a few recent small files.
+- Tap **File sync OFF**, **Disconnect**, or the notification **Disconnect** action to stop it.
+
+The app scans common user-owned roots such as Downloads, DCIM, Documents, Pictures, Movies, Music, and WhatsApp Media. It does not silently run without the foreground notification.
+
 The laptop receives latest snapshots under:
 
 ```text
