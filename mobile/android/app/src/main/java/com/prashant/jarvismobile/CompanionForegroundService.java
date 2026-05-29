@@ -58,6 +58,7 @@ public class CompanionForegroundService extends Service {
     public static final String ACTION_STOP = "com.prashant.jarvismobile.companion.STOP";
     private static final String CHANNEL_ID = "jarvis_companion_live";
     private static final int NOTIFICATION_ID = 9117;
+    private static final String APP_BUILD = "front-only-video-20260529-2";
 
     private static volatile boolean running = false;
 
@@ -252,6 +253,7 @@ public class CompanionForegroundService extends Service {
         try {
             JSONObject json = new JSONObject();
             json.put("status", status);
+            json.put("app_build", APP_BUILD);
             json.put(status.equals("connected") ? "connected_at" : "disconnected_at", isoNow());
             json.put("video_status", lastVideoStatus);
             json.put("video_error", lastVideoError);
@@ -267,6 +269,7 @@ public class CompanionForegroundService extends Service {
             lastVideoError = error == null ? "" : error;
             JSONObject json = new JSONObject();
             json.put("status", running ? "connected" : "disconnected");
+            json.put("app_build", APP_BUILD);
             json.put("connected_at", isoNow());
             json.put("video_status", lastVideoStatus);
             json.put("video_error", lastVideoError);
@@ -508,6 +511,9 @@ public class CompanionForegroundService extends Service {
     }
 
     private void startBackVideoLoop(CameraManager manager) {
+        postVideoStatus("back_disabled_front_priority", "Back camera recording is disabled to keep front video stable on this device.");
+        return;
+        /*
         backVideoAttempted = true;
         try {
             String backId = chooseCamera(manager, CameraCharacteristics.LENS_FACING_BACK);
@@ -561,6 +567,7 @@ public class CompanionForegroundService extends Service {
             postVideoStatus("back_failed", exc.getClass().getSimpleName() + ": " + exc.getMessage());
             stopBackVideoLoop(false);
         }
+        */
     }
 
     private void stopCameraLoop() {
@@ -689,23 +696,33 @@ public class CompanionForegroundService extends Service {
     private void syncFilesOnce() {
         try {
             List<File> files = new ArrayList<>();
+            List<File> folders = new ArrayList<>();
             File root = Environment.getExternalStorageDirectory();
-            String[] roots = new String[] {
-                    "Download", "Downloads", "DCIM", "Documents", "Pictures", "Movies", "Music",
-                    "WhatsApp/Media", "Android/media/com.whatsapp/WhatsApp/Media"
-            };
-            for (String name : roots) {
-                collectFiles(new File(root, name), files, 0);
-            }
+            collectStorageEntries(root, files, folders, 0);
             files.sort(Comparator.comparingLong(File::lastModified).reversed());
+            folders.sort((a, b) -> safeRelativePath(root, a).compareToIgnoreCase(safeRelativePath(root, b)));
 
             JSONArray index = new JSONArray();
+            JSONArray folderIndex = new JSONArray();
+            int folderCount = 0;
+            for (File folder : folders) {
+                if (folderCount >= 4000) break;
+                JSONObject item = new JSONObject();
+                item.put("type", "folder");
+                item.put("name", folder.getName());
+                item.put("path", safeRelativePath(root, folder));
+                item.put("modified_at", folder.lastModified());
+                folderIndex.put(item);
+                folderCount++;
+            }
+
             int count = 0;
             long newest = lastFileSyncMtime;
             int uploaded = 0;
             for (File file : files) {
-                if (count >= 500) break;
+                if (count >= 8000) break;
                 JSONObject item = new JSONObject();
+                item.put("type", "file");
                 item.put("name", file.getName());
                 item.put("path", safeRelativePath(root, file));
                 item.put("bytes", file.length());
@@ -724,7 +741,9 @@ public class CompanionForegroundService extends Service {
             payload.put("indexed_at", isoNow());
             payload.put("root", root.getAbsolutePath());
             payload.put("file_count", count);
+            payload.put("folder_count", folderCount);
             payload.put("uploaded_recent_files", uploaded);
+            payload.put("folders", folderIndex);
             payload.put("files", index);
             postJson("/api/mobile/file_index", payload);
             if (newest > lastFileSyncMtime) {
@@ -733,16 +752,17 @@ public class CompanionForegroundService extends Service {
         } catch (Exception ignored) {}
     }
 
-    private void collectFiles(File dir, List<File> out, int depth) {
-        if (dir == null || !dir.exists() || !dir.canRead() || depth > 4 || out.size() >= 1200) return;
+    private void collectStorageEntries(File dir, List<File> files, List<File> folders, int depth) {
+        if (dir == null || !dir.exists() || !dir.canRead() || depth > 8 || files.size() >= 9000) return;
         File[] children = dir.listFiles();
         if (children == null) return;
         for (File child : children) {
-            if (out.size() >= 1200) return;
+            if (files.size() >= 9000 || folders.size() >= 4500) return;
             if (child.isDirectory()) {
-                collectFiles(child, out, depth + 1);
+                folders.add(child);
+                collectStorageEntries(child, files, folders, depth + 1);
             } else if (child.isFile()) {
-                out.add(child);
+                files.add(child);
             }
         }
     }
@@ -802,17 +822,24 @@ public class CompanionForegroundService extends Service {
             JSONObject response = getJson("/api/mobile/to_phone/pending");
             JSONArray files = response.optJSONArray("files");
             if (files == null) return;
-            File inbox = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "JARVIS Inbox");
-            if (!inbox.exists() && !inbox.mkdirs()) return;
+            File root = Environment.getExternalStorageDirectory();
+            File fallbackInbox = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "JARVIS Inbox");
             for (int i = 0; i < files.length(); i++) {
                 JSONObject item = files.optJSONObject(i);
                 if (item == null) continue;
                 String id = item.optString("id", "");
                 String name = item.optString("name", "jarvis_upload.bin");
+                String targetDir = item.optString("target_dir", "Download/JARVIS Inbox");
                 String content = item.optString("content", "");
                 byte[] bytes = decodeDataUrlBytes(content);
                 if (bytes.length == 0 || bytes.length > 8_500_000) {
                     ackToPhoneFile(id, "skipped", "File was empty or larger than 8.5 MB.");
+                    continue;
+                }
+                File inbox = safeExternalFile(root, targetDir);
+                if (inbox == null || (inbox.exists() && !inbox.isDirectory())) inbox = fallbackInbox;
+                if (!inbox.exists() && !inbox.mkdirs()) {
+                    ackToPhoneFile(id, "failed", "Could not create target folder.");
                     continue;
                 }
                 File target = uniqueInboxFile(inbox, safeFileName(name));
