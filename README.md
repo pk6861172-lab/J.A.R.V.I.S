@@ -8,6 +8,8 @@ This README is beginner-friendly. If you are very new, start with [for beginners
 
 For family face recognition, read [FAMILY_FACE_RECOGNITION.md](FAMILY_FACE_RECOGNITION.md). It explains how to use local photos from Google Photos safely.
 
+For Android access from anywhere through Ngrok, read [REMOTE_ACCESS.md](REMOTE_ACCESS.md).
+
 > Important: JARVIS is safe to share because this repository does not need to contain your private passwords or API keys. Every user must add their own private settings on their own computer.
 
 ---
