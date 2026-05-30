@@ -27,14 +27,33 @@ Server URL: http://YOUR-PC-LAN-IP:8765
 API token:  the same JARVIS_WEB_TOKEN
 ```
 
-## Ngrok / HTTPS Companion Mode
+## Remote HTTPS Companion Mode
 
-For remote access, expose the laptop server through an HTTPS Ngrok URL and enter that URL in the app settings:
+For remote access, expose the laptop server through an HTTPS tunnel URL and enter that URL in the app settings.
+
+Recommended free option:
+
+```powershell
+winget install --id Cloudflare.cloudflared -e
+.\scripts\start_cloudflare_remote_access.ps1
+```
+
+For Shreya JARVIS:
+
+```powershell
+.\scripts\start_cloudflare_remote_access.ps1 -Shreya
+```
+
+The script prints the values to use:
 
 ```text
-Server URL: https://your-ngrok-url.ngrok-free.app
+Server URL: https://your-cloudflare-url.trycloudflare.com
 API token:  the same JARVIS_WEB_TOKEN
 ```
+
+Ngrok URLs also work, but Cloudflare Quick Tunnel is the recommended free fallback when ngrok hits account limits.
+
+Quick Tunnel URLs can change after restart. If the URL changes, update the app settings or rebuild the APK with the new default URL.
 
 Live companion mode is transparent:
 
