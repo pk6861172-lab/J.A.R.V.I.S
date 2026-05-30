@@ -1372,7 +1372,7 @@ body {
 
 .mobile-file-toolbar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
 }
@@ -1393,6 +1393,18 @@ body {
   padding-right: 4px;
 }
 
+.mobile-breadcrumb {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid rgba(94, 234, 212, 0.16);
+  border-radius: 8px;
+  color: var(--text-dim);
+  font-size: 0.68rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .mobile-file-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
@@ -1402,6 +1414,11 @@ body {
   border: 1px solid rgba(148, 163, 184, 0.16);
   border-radius: 8px;
   background: rgba(15, 23, 42, 0.34);
+}
+
+.mobile-file-row.folder {
+  border-color: rgba(94, 234, 212, 0.24);
+  cursor: pointer;
 }
 
 .mobile-file-row strong,

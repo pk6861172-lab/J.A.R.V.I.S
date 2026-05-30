@@ -75,6 +75,8 @@ let systemStatsPollTimer = null;
 let mobileCompanionPollTimer = null;
 let latestMobileMapUrl = "";
 let latestMobileFiles = [];
+let latestMobileFolders = [];
+let currentMobilePath = "";
 
 // --- Initialize Elements ---
 document.addEventListener("DOMContentLoaded", () => {
@@ -1115,7 +1117,9 @@ function updateMobileCompanionUI(data) {
   const fileIndex = data.file_index || {};
   const latestFile = data.latest_file || {};
   const files = Array.isArray(data.files) ? data.files : [];
+  const folders = Array.isArray(data.folders) ? data.folders : [];
   latestMobileFiles = files;
+  latestMobileFolders = folders;
   latestMobileMapUrl = data.map_url || "";
 
   const statusEl = document.getElementById("mobile-session-status");
@@ -1159,8 +1163,9 @@ function updateMobileCompanionUI(data) {
 
   if (filesEl) {
     const count = fileIndex.file_count ?? files.length;
+    const folderCount = fileIndex.folder_count ?? folders.length;
     const uploaded = fileIndex.uploaded_recent_files;
-    filesEl.textContent = count || uploaded ? `${count || 0} indexed${uploaded ? ` | ${uploaded} uploaded` : ""}` : "--";
+    filesEl.textContent = count || folderCount || uploaded ? `${folderCount || 0} folders | ${count || 0} files${uploaded ? ` | ${uploaded} uploaded` : ""}` : "--";
   }
 
   if (latestFileEl) {
@@ -1176,17 +1181,37 @@ function updateMobileCompanionUI(data) {
 function renderMobileFileList() {
   const list = document.getElementById("mobile-file-list");
   const countEl = document.getElementById("mobile-file-count");
+  const crumb = document.getElementById("mobile-breadcrumb");
   const search = String(document.getElementById("mobile-file-search")?.value || "").trim().toLowerCase();
   if (!list) return;
-  const rows = latestMobileFiles
-    .filter(file => !search || String(file.path || file.name || "").toLowerCase().includes(search))
-    .slice(0, 80);
-  if (countEl) countEl.textContent = `${latestMobileFiles.length} files`;
-  if (!rows.length) {
-    list.innerHTML = `<div class="mobile-file-empty">${latestMobileFiles.length ? "No file matched your search." : "Turn File sync ON in the phone app to browse storage."}</div>`;
+  const normalizedPath = normalizeMobilePath(currentMobilePath);
+  const visibleFolders = latestMobileFolders
+    .filter(folder => search ? String(folder.path || folder.name || "").toLowerCase().includes(search) : mobileParentPath(folder.path || "") === normalizedPath)
+    .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+  const visibleFiles = latestMobileFiles
+    .filter(file => search ? String(file.path || file.name || "").toLowerCase().includes(search) : mobileParentPath(file.path || "") === normalizedPath)
+    .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+  if (countEl) countEl.textContent = `${latestMobileFolders.length} folders | ${latestMobileFiles.length} files`;
+  if (crumb) crumb.textContent = normalizedPath ? `Phone Storage / ${normalizedPath}` : "Phone Storage";
+  if (!visibleFolders.length && !visibleFiles.length) {
+    list.innerHTML = `<div class="mobile-file-empty">${latestMobileFiles.length || latestMobileFolders.length ? "No item found here." : "Turn File sync ON in the phone app to browse storage."}</div>`;
     return;
   }
-  list.innerHTML = rows.map(file => {
+  const folderHtml = visibleFolders.map(folder => {
+    const rel = escapeHtml(folder.path || folder.name || "");
+    const name = escapeHtml(folder.name || rel.split("/").pop() || "Folder");
+    return `
+      <div class="mobile-file-row folder" data-mobile-folder="${rel}">
+        <div>
+          <strong>[DIR] ${name}</strong>
+          <small>${rel || "Phone Storage"}</small>
+        </div>
+        <small>Folder</small>
+        <button class="hud-btn-mini" data-mobile-action="open-folder">OPEN</button>
+      </div>
+    `;
+  }).join("");
+  const fileHtml = visibleFiles.map(file => {
     const rel = escapeHtml(file.path || file.name || "");
     const name = escapeHtml(file.name || rel.split("/").pop() || "file");
     const detail = `${bytesLabel(file.bytes)} | ${file.modified_at ? shortTime(Number(file.modified_at)) : "mobile file"}`;
@@ -1201,6 +1226,29 @@ function renderMobileFileList() {
       </div>
     `;
   }).join("");
+  list.innerHTML = folderHtml + fileHtml;
+}
+
+function normalizeMobilePath(path) {
+  return String(path || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+}
+
+function mobileParentPath(path) {
+  const clean = normalizeMobilePath(path);
+  const idx = clean.lastIndexOf("/");
+  return idx >= 0 ? clean.slice(0, idx) : "";
+}
+
+function openMobileFolder(path) {
+  currentMobilePath = normalizeMobilePath(path);
+  const search = document.getElementById("mobile-file-search");
+  if (search) search.value = "";
+  renderMobileFileList();
+}
+
+function mobileFolderUp() {
+  currentMobilePath = mobileParentPath(currentMobilePath);
+  renderMobileFileList();
 }
 
 function mobileDownloadUrl(path) {
@@ -1264,7 +1312,7 @@ async function sendFilesToPhone(files) {
       const response = await fetch("/api/mobile/to_phone", {
         method: "POST",
         headers: authedHeaders(),
-        body: JSON.stringify({ name: file.name, bytes: file.size, content })
+        body: JSON.stringify({ name: file.name, bytes: file.size, target_dir: currentMobilePath || "Download/JARVIS Inbox", content })
       });
       const data = await response.json();
       if (!response.ok || !data.ok) throw new Error(data.error || "Upload queue failed.");
@@ -3102,8 +3150,19 @@ function setupEventListeners() {
   const mobileFileList = document.getElementById("mobile-file-list");
   const mobileDrop = document.getElementById("mobile-drop-zone");
   const mobileUpload = document.getElementById("mobile-upload-input");
+  const mobileUp = document.getElementById("mobile-folder-up-btn");
   if (mobileSearch) mobileSearch.addEventListener("input", renderMobileFileList);
+  if (mobileUp) mobileUp.addEventListener("click", () => {
+    playSynthSound("click");
+    mobileFolderUp();
+  });
   if (mobileFileList) mobileFileList.addEventListener("click", event => {
+    const folderRow = event.target.closest("[data-mobile-folder]");
+    if (folderRow) {
+      playSynthSound("click");
+      openMobileFolder(folderRow.getAttribute("data-mobile-folder") || "");
+      return;
+    }
     const button = event.target.closest("[data-mobile-action='download']");
     const row = event.target.closest("[data-mobile-path]");
     if (!button || !row) return;

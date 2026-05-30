@@ -239,12 +239,17 @@ def _mobile_companion_status() -> dict:
             frame["preview_error"] = str(exc)
 
     files = []
+    folders = []
     if file_index and isinstance(file_index.get("files"), list):
-        files = file_index.get("files", [])[:60]
+        files = file_index.get("files", [])
+    if file_index and isinstance(file_index.get("folders"), list):
+        folders = file_index.get("folders", [])
     file_index_public = dict(file_index or {})
     if file_index_public:
         file_index_public["files"] = files
+        file_index_public["folders"] = folders
         file_index_public["displayed_files"] = len(files)
+        file_index_public["displayed_folders"] = len(folders)
 
     map_url = ""
     if location and location.get("latitude") is not None and location.get("longitude") is not None:
@@ -264,6 +269,7 @@ def _mobile_companion_status() -> dict:
         "file_index": file_index_public or None,
         "latest_file": latest_file,
         "files": files,
+        "folders": folders,
         "pending_file_requests": _mobile_pending_file_requests(),
         "to_phone_queue": _mobile_to_phone_queue(False),
     }
@@ -1565,6 +1571,7 @@ class JarvisWebHandler(BaseHTTPRequestHandler):
                     "id": queue_id,
                     "name": safe_parts[-1],
                     "relative_path": "/".join(safe_parts),
+                    "target_dir": "/".join(_mobile_safe_rel_parts(payload.get("target_dir") or "Download/JARVIS Inbox")),
                     "bytes": len(content),
                     "mime": mime,
                     "stored_path": str(target),
@@ -1619,11 +1626,13 @@ class JarvisWebHandler(BaseHTTPRequestHandler):
                     "indexed_at": payload.get("indexed_at"),
                     "root": payload.get("root"),
                     "file_count": payload.get("file_count"),
+                    "folder_count": payload.get("folder_count"),
                     "uploaded_recent_files": payload.get("uploaded_recent_files"),
-                    "files": files[:1000],
+                    "folders": payload.get("folders") if isinstance(payload.get("folders"), list) else [],
+                    "files": files,
                     "client": self.client_address[0],
                 })
-                self._send_json({"ok": True, "indexed": min(len(files), 1000)})
+                self._send_json({"ok": True, "indexed": len(files)})
             except json.JSONDecodeError:
                 self._send_json({"ok": False, "error": "Invalid JSON"}, HTTPStatus.BAD_REQUEST)
             except Exception as exc:
@@ -1941,7 +1950,6 @@ class JarvisWebHandler(BaseHTTPRequestHandler):
 
                 if ok:
                     # Create a short-lived session cookie
-                    import uuid
                     session_id = str(uuid.uuid4())
                     expires = time.time() + 3600  # 1 hour
                     if not hasattr(self.server, 'sessions'):
