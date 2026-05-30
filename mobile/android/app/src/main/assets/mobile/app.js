@@ -344,6 +344,7 @@ async function connectCompanion() {
 }
 
 async function disconnectCompanion(notify = true) {
+  const nativeServiceMode = nativeAvailable() && window.JarvisAndroid.stopCompanionService;
   if (nativeAvailable() && window.JarvisAndroid.stopCompanionService) {
     try {
       window.JarvisAndroid.stopCompanionService();
@@ -369,12 +370,12 @@ async function disconnectCompanion(notify = true) {
   preview.srcObject = null;
   preview.classList.add("hidden");
   setCompanionStatus(false, "Disconnected");
-  if (notify && state.serverUrl) {
+  if (notify && state.serverUrl && !nativeServiceMode) {
     try {
       await companionApi("/api/mobile/session", { status: "disconnected", disconnected_at: new Date().toISOString() });
     } catch {}
   }
-  setCompanionMessage("Live sharing is OFF.");
+  setCompanionMessage(nativeServiceMode ? "Stopping native companion. Video upload may continue for a moment." : "Live sharing is OFF.");
 }
 
 function addBubble(text, who = "jarvis") {
