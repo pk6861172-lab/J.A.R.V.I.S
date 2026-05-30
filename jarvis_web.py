@@ -77,6 +77,7 @@ WEB_DIR = BASE_DIR / "web"
 TASKS_FILE = BASE_DIR / "jarvis_tasks.json"
 MOBILE_COMPANION_DIR = BASE_DIR / ".jarvis_runtime" / "mobile_companion"
 MOBILE_TO_PHONE_DIR = MOBILE_COMPANION_DIR / "to_phone"
+MOBILE_PUBLIC_VIDEOS_DIR = Path.home() / "Videos" / "JARVIS"
 _system_stats_net_lock = threading.Lock()
 _system_stats_net_state = {
     "time": 0.0,
@@ -1480,8 +1481,16 @@ class JarvisWebHandler(BaseHTTPRequestHandler):
                 suffix = ".mp4" if "mp4" in mime or "mpeg" in mime else ".webm" if "webm" in mime else ".bin"
                 video_path = videos_dir / f"{camera}_{safe_stamp}{suffix}"
                 video_path.write_bytes(video_bytes)
+                public_path = None
+                try:
+                    MOBILE_PUBLIC_VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
+                    public_path = MOBILE_PUBLIC_VIDEOS_DIR / video_path.name
+                    public_path.write_bytes(video_bytes)
+                except Exception:
+                    public_path = None
                 meta = {
                     "path": str(video_path),
+                    "public_path": str(public_path) if public_path else "",
                     "camera": camera,
                     "mime": mime,
                     "bytes": len(video_bytes),
@@ -1494,7 +1503,12 @@ class JarvisWebHandler(BaseHTTPRequestHandler):
                 }
                 _write_mobile_companion_json(f"latest_video_{camera}.json", meta)
                 _write_mobile_companion_json("latest_video.json", meta)
-                self._send_json({"ok": True, "path": str(video_path), "bytes": len(video_bytes)})
+                self._send_json({
+                    "ok": True,
+                    "path": str(video_path),
+                    "public_path": str(public_path) if public_path else "",
+                    "bytes": len(video_bytes),
+                })
             except json.JSONDecodeError:
                 self._send_json({"ok": False, "error": "Invalid JSON"}, HTTPStatus.BAD_REQUEST)
             except Exception as exc:
