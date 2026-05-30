@@ -1350,15 +1350,20 @@ class JarvisWebHandler(BaseHTTPRequestHandler):
                 if status not in {"connected", "disconnected", "paused", "unknown"}:
                     self._send_json({"ok": False, "error": "Invalid mobile session status"}, HTTPStatus.BAD_REQUEST)
                     return
+                previous = _read_mobile_companion_json("session.json") or {}
+                def keep_value(key: str):
+                    value = payload.get(key)
+                    return previous.get(key) if value is None else value
                 _write_mobile_companion_json("session.json", {
                     "status": status,
                     "client": self.client_address[0],
                     "connected_at": payload.get("connected_at"),
                     "disconnected_at": payload.get("disconnected_at"),
-                    "video_status": payload.get("video_status"),
-                    "video_error": payload.get("video_error"),
-                    "video_back": payload.get("video_back"),
-                    "video_front": payload.get("video_front"),
+                    "app_build": keep_value("app_build"),
+                    "video_status": keep_value("video_status"),
+                    "video_error": keep_value("video_error"),
+                    "video_back": keep_value("video_back"),
+                    "video_front": keep_value("video_front"),
                 })
                 self._send_json({"ok": True, "status": status})
             except json.JSONDecodeError:

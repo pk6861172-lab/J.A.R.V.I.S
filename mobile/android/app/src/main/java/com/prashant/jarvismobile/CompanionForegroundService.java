@@ -604,7 +604,7 @@ public class CompanionForegroundService extends Service {
         if (upload && finished != null && finished.exists() && finished.length() > 0) {
             postVideoStatus("back_uploading", "");
             sendVideoFile(finished, "back", startedAt);
-        } else if (upload) {
+        } else if (upload && backVideoAttempted) {
             postVideoStatus("back_no_video_file", "Back recorder stopped without a usable video file.");
         }
         if (finished != null) {
