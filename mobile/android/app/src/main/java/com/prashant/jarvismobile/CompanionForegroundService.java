@@ -138,8 +138,15 @@ public class CompanionForegroundService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? "" : intent.getAction();
         if (ACTION_STOP.equals(action)) {
-            stopLiveSharing();
-            stopSelf();
+            if (worker != null) {
+                worker.post(() -> {
+                    stopLiveSharing();
+                    stopSelf();
+                });
+            } else {
+                stopLiveSharing();
+                stopSelf();
+            }
             return START_NOT_STICKY;
         }
         startForeground(NOTIFICATION_ID, buildNotification("Starting live sharing..."));
